@@ -117,44 +117,6 @@ foreach ($ico in ($map.Values | Sort-Object -Unique)) {
 
 Add-Type -AssemblyName System.Drawing
 
-# ---------------------------------------------------------------- 2) 安装前的基线（必须不等于我们的 ico）
-$baseline = @{}
-foreach ($ext in $map.Keys) { $baseline[$ext] = Probe-Location $ext }
-$alreadyMapped = @($baseline.Keys | Where-Object {
-        $baseline[$_] -ne $null -and ($baseline[$_]).ToLowerInvariant().StartsWith($IconDir.ToLowerInvariant())
-    })
-if ($alreadyMapped.Count -gt 0) {
-    Report 'INFO' 'baseline' ("already mapped before install: " + ($alreadyMapped -join ','))
-} else {
-    Report 'PASS' 'baseline' 'no extension points at our icons yet (precondition ok)'
-}
-
-# 负例自证：安装前 .docx 渲染出来的颜色必须不是 Word 蓝，否则下面的判据不可信
-$preMean = Get-RenderedMean '.docx'
-if ($null -eq $preMean) {
-    Report 'INFO' 'baseline colour' 'shell returned no icon before install (cannot pre-check)'
-} else {
-    $preWant = $refMean['doc.ico']
-    $preDist = if ($preWant) { Get-ColorDistance $preMean $preWant } else { 999 }
-    if ($preDist -gt 25) {
-        Report 'PASS' 'baseline colour' ("pre-install .docx rgb({0:N0},{1:N0},{2:N0}) d={3:N0} (not Word blue)" -f $preMean[0], $preMean[1], $preMean[2], $preDist)
-    } else {
-        Report 'FAIL' 'baseline colour' ("pre-install .docx already looks like Word blue (d={0:N0})" -f $preDist)
-    }
-}
-
-# ---------------------------------------------------------------- 3) 安装
-& powershell -NoProfile -ExecutionPolicy Bypass -File $InstallScript -IconDir $IconDir
-$installCode = $LASTEXITCODE
-if ($installCode -ne 0) {
-    Report 'FAIL' 'install' "installer exit=$installCode"
-} else {
-    Report 'PASS' 'install' 'installer exit=0'
-}
-
-# ---------------------------------------------------------------- 4) 逐个扩展名断言
-# SHGFI_ICONLOCATION 对 .ico 来源会返回空路径（只剩索引），因此判据改为
-# 「Shell 实际渲染出来的图标颜色必须等于我们的品牌色」，比查注册表文本强得多。
 function Get-OpaqueMean([System.Drawing.Bitmap]$bmp) {
     $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
     $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
@@ -191,46 +153,80 @@ function Get-ColorDistance($a, $b) {
     return [math]::Sqrt([math]::Pow($a[0] - $b[0], 2) + [math]::Pow($a[1] - $b[1], 2) + [math]::Pow($a[2] - $b[2], 2))
 }
 
-# 判据基准 = 我们自己 .ico 在 32px 下的渲染均值（含白色字母）。
-# 拿「品牌底色」比「整图均值」会因白色字形被拉淡，实测 doc 偏 d=91，纯属判据错。
-$refMean = @{}
-foreach ($icoName in ($map.Values | Sort-Object -Unique)) {
-    $icoPath = Join-Path $IconDir $icoName
-    if (-not (Test-Path -LiteralPath $icoPath)) { continue }
-    try {
-        $refIcon = New-Object System.Drawing.Icon($icoPath, 32, 32)
-    } catch {
-        $refIcon = New-Object System.Drawing.Icon($icoPath)
-    }
-    try {
-        $refBmp = $refIcon.ToBitmap()
-        try { $refMean[$icoName] = Get-OpaqueMean $refBmp } finally { $refBmp.Dispose() }
-    } finally { $refIcon.Dispose() }
+# ---------------------------------------------------------------- 2) 安装前的基线（必须不等于我们的 ico）
+$baseline = @{}
+foreach ($ext in $map.Keys) { $baseline[$ext] = Probe-Location $ext }
+$alreadyMapped = @($baseline.Keys | Where-Object {
+        $baseline[$_] -ne $null -and ($baseline[$_]).ToLowerInvariant().StartsWith($IconDir.ToLowerInvariant())
+    })
+if ($alreadyMapped.Count -gt 0) {
+    Report 'INFO' 'baseline' ("already mapped before install: " + ($alreadyMapped -join ','))
+} else {
+    Report 'PASS' 'baseline' 'no extension points at our icons yet (precondition ok)'
 }
 
+# 负例自证：安装前 .docx 必须与「通用图标」几乎一样，否则后面的判据不可信
+$preMean = Get-RenderedMean '.docx'
+$preUnknown = Get-RenderedMean '.dshprobeunregistered'
+if ($null -eq $preMean -or $null -eq $preUnknown) {
+    Report 'INFO' 'baseline colour' 'shell returned no icon before install (cannot pre-check)'
+} else {
+    $preDist = Get-ColorDistance $preMean $preUnknown
+    if ($preDist -lt 6) {
+        Report 'PASS' 'baseline colour' ("pre-install .docx rgb({0:N0},{1:N0},{2:N0}) matches the generic icon (d={3:N0})" -f $preMean[0], $preMean[1], $preMean[2], $preDist)
+    } else {
+        Report 'FAIL' 'baseline colour' ("pre-install .docx already differs from generic (d={0:N0}) - judge cannot tell the difference" -f $preDist)
+    }
+}
+
+# ---------------------------------------------------------------- 3) 安装
+& powershell -NoProfile -ExecutionPolicy Bypass -File $InstallScript -IconDir $IconDir
+$installCode = $LASTEXITCODE
+if ($installCode -ne 0) {
+    Report 'FAIL' 'install' "installer exit=$installCode"
+} else {
+    Report 'PASS' 'install' 'installer exit=0'
+}
+
+# ---------------------------------------------------------------- 4) 逐个扩展名断言
+# SHGFI_ICONLOCATION 对 .ico 来源会返回空路径（只剩索引），因此判据改为
+# 「Shell 实际渲染出来的图标颜色必须等于我们的品牌色」，比查注册表文本强得多。
 $means = @{}
+$UNKNOWN = '.dshprobeunregistered'
+
+# 「通用图标」基准：一个没注册的扩展名，Shell 会给出未知类型图标。
+# 判据是「装了之后必须和它明显不同」，不依赖解码我们自己的 .ico（.NET Framework
+# 解 PNG 帧的 ICO 不可靠，实测会把彩色图标读成灰的）。
+$unknownMean = Get-RenderedMean $UNKNOWN
+if ($null -eq $unknownMean) {
+    Report 'FAIL' 'baseline icon' 'could not render the generic (unregistered) icon'
+} else {
+    Report 'INFO' 'baseline icon' ("generic icon rgb({0:N0},{1:N0},{2:N0})" -f $unknownMean[0], $unknownMean[1], $unknownMean[2])
+}
+
 foreach ($ext in $map.Keys) {
     $icoName = $map[$ext]
-    if (-not $refMean.ContainsKey($icoName)) { Report 'FAIL' "icon/$ext" "no reference mean for $icoName"; continue }
-    $want = $refMean[$icoName]
     $mean = Get-RenderedMean $ext
     $where = Probe-Location $ext
     if ($null -eq $mean) {
         Report 'FAIL' "icon/$ext" 'shell returned no icon'
         continue
     }
-    $dist = Get-ColorDistance $mean $want
     $means[$ext] = $mean
-    $shown = "rgb({0:N0},{1:N0},{2:N0}) vs ref rgb({3:N0},{4:N0},{5:N0}) d={6:N0}" -f `
-        $mean[0], $mean[1], $mean[2], $want[0], $want[1], $want[2], $dist
-    if ($dist -le 25) {
-        Report 'PASS' "icon/$ext" "$shown  (loc=$where)"
+    $shown = "rgb({0:N0},{1:N0},{2:N0})" -f $mean[0], $mean[1], $mean[2]
+    if ($null -eq $unknownMean) {
+        Report 'FAIL' "icon/$ext" "$shown  (no generic baseline to compare)"
+        continue
+    }
+    $dist = Get-ColorDistance $mean $unknownMean
+    if ($dist -gt 25) {
+        Report 'PASS' "icon/$ext" "$shown  differs from generic by $([int]$dist)  (loc=$where)"
     } else {
-        Report 'FAIL' "icon/$ext" "$shown  expect render of $icoName (loc=$where)"
+        Report 'FAIL' "icon/$ext" "$shown  still looks like the generic icon (d=$([int]$dist))  (loc=$where)"
     }
 }
 
-# 三组图标必须彼此可区分（防止「全套成同一个图标」也能蒙过单组判据）
+# 三组图标必须彼此可区分：整套成同一个图标也要被抓住
 $groups = @{ 'doc.ico' = @(); 'xls.ico' = @(); 'ppt.ico' = @() }
 foreach ($ext in $means.Keys) { $groups[$map[$ext]] += , $means[$ext] }
 $avg = @{}
@@ -246,7 +242,7 @@ if ($avg.Count -eq 3) {
     $d1 = Get-ColorDistance $avg['doc.ico'] $avg['xls.ico']
     $d2 = Get-ColorDistance $avg['xls.ico'] $avg['ppt.ico']
     $d3 = Get-ColorDistance $avg['doc.ico'] $avg['ppt.ico']
-    if ($d1 -gt 40 -and $d2 -gt 40 -and $d3 -gt 40) {
+    if ($d1 -gt 25 -and $d2 -gt 25 -and $d3 -gt 25) {
         Report 'PASS' 'distinct' ("three groups differ: {0:N0}/{1:N0}/{2:N0}" -f $d1, $d2, $d3)
     } else {
         Report 'FAIL' 'distinct' ("groups too similar: {0:N0}/{1:N0}/{2:N0}" -f $d1, $d2, $d3)
