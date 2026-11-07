@@ -19,6 +19,14 @@ jobs:
         shell: powershell
         run: .\ci\accept_behavior_windows.ps1 -Source "${{ github.workspace }}\dist" -ServeLocal
 
+      - name: Generate file icons
+        shell: powershell
+        run: .\tools\file-icons\generate-icons.ps1 -Force
+
+      - name: File icon acceptance
+        shell: powershell
+        run: .\ci\accept_file_icons.ps1 -IconDir "${{ github.workspace }}\tools\file-icons" -InstallScript "${{ github.workspace }}\tools\file-icons\install-file-icons.ps1"
+
       - name: Collect launcher log
         if: always()
         shell: powershell
