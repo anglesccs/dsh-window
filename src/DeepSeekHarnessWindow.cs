@@ -19,13 +19,13 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyDescription("DeepSeek Harness standalone window (WebView2)")]
 [assembly: AssemblyCompany("Community project, not affiliated with DeepSeek")]
 [assembly: AssemblyProduct("DeepSeek Harness Window")]
-[assembly: AssemblyVersion("1.4.2.0")]
-[assembly: AssemblyFileVersion("1.4.2.0")]
+[assembly: AssemblyVersion("1.4.3.0")]
+[assembly: AssemblyFileVersion("1.4.3.0")]
 
 internal static class Program
 {
     private const string AppTitle = "DeepSeek Harness";
-    private const string AppVersion = "1.4.2";
+    private const string AppVersion = "1.4.3";
     private const string ConfigFileName = "dsh-window.config.json";
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 3080;
@@ -1244,6 +1244,7 @@ internal sealed class MainForm : Form
     private int retryCount;
     private bool retryProbeRunning;
     private bool errorPageShown;
+    private volatile bool suppressNextNavigationError;
 
     public MainForm(Process ownedServer, string webUrl, bool serverReady, bool killServerOnClose,
         bool closeToTray, bool externalMode)
@@ -1445,6 +1446,17 @@ internal sealed class MainForm : Form
     {
         if (!e.IsSuccess)
         {
+            // We cancelled this navigation ourselves to hand an external scheme
+            // to the OS. WebView2 reports that as OperationCanceled; it is not a
+            // lost server, so don't flip to the error page and start retrying.
+            if (suppressNextNavigationError &&
+                e.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled)
+            {
+                suppressNextNavigationError = false;
+                Program.Log("navigation cancelled on purpose (external scheme); not a failure");
+                return;
+            }
+            suppressNextNavigationError = false;
             // Navigation itself failed (remote went away mid-flight).
             serverReady = false;
             Program.Log("navigation failed: " + e.WebErrorStatus);
@@ -1452,6 +1464,7 @@ internal sealed class MainForm : Form
                 ShowErrorPageAndScheduleRetry();
             return;
         }
+        suppressNextNavigationError = false;
         // NavigateToString also completes "successfully"; never treat our own
         // error page as a restored connection.
         if (errorPageShown)
@@ -1783,6 +1796,8 @@ internal sealed class MainForm : Form
         }
         // Cancel first: WebView2 would otherwise fail the navigation itself and
         // leave the shell showing the previous page with no feedback at all.
+        // Remember that the resulting OperationCanceled is intentional.
+        suppressNextNavigationError = true;
         e.Cancel = true;
         Program.Log("navigation to external scheme handed to OS: " + uri);
         try
