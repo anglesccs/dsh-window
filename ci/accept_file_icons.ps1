@@ -117,10 +117,21 @@ foreach ($ico in ($map.Values | Sort-Object -Unique)) {
 
 Add-Type -AssemblyName System.Drawing
 
-$expected = @{
-    'doc.ico' = @(0x2B, 0x57, 0x9A)   # Word blue
-    'xls.ico' = @(0x21, 0x73, 0x46)   # Excel green
-    'ppt.ico' = @(0xD2, 0x47, 0x26)   # PowerPoint orange-red
+# 判据基准 = 我们自己 .ico 在 32px 下的渲染均值（含白色字母）。
+# 拿「品牌底色」比「整图均值」会因白色字形被拉淡，实测 doc 偏 d=91，纯属判据错。
+$refMean = @{}
+foreach ($icoName in ($map.Values | Sort-Object -Unique)) {
+    $icoPath = Join-Path $IconDir $icoName
+    if (-not (Test-Path -LiteralPath $icoPath)) { continue }
+    try {
+        $refIcon = New-Object System.Drawing.Icon($icoPath, 32, 32)
+    } catch {
+        $refIcon = New-Object System.Drawing.Icon($icoPath)
+    }
+    try {
+        $refBmp = $refIcon.ToBitmap()
+        try { $refMean[$icoName] = Get-OpaqueMean $refBmp } finally { $refBmp.Dispose() }
+    } finally { $refIcon.Dispose() }
 }
 
 function Get-OpaqueMean([System.Drawing.Bitmap]$bmp) {
@@ -176,8 +187,9 @@ $preMean = Get-RenderedMean '.docx'
 if ($null -eq $preMean) {
     Report 'INFO' 'baseline colour' 'shell returned no icon before install (cannot pre-check)'
 } else {
-    $preDist = Get-ColorDistance $preMean $expected['doc.ico']
-    if ($preDist -gt 45) {
+    $preWant = $refMean['doc.ico']
+    $preDist = if ($preWant) { Get-ColorDistance $preMean $preWant } else { 999 }
+    if ($preDist -gt 25) {
         Report 'PASS' 'baseline colour' ("pre-install .docx rgb({0:N0},{1:N0},{2:N0}) d={3:N0} (not Word blue)" -f $preMean[0], $preMean[1], $preMean[2], $preDist)
     } else {
         Report 'FAIL' 'baseline colour' ("pre-install .docx already looks like Word blue (d={0:N0})" -f $preDist)
@@ -199,7 +211,8 @@ if ($installCode -ne 0) {
 $means = @{}
 foreach ($ext in $map.Keys) {
     $icoName = $map[$ext]
-    $want = $expected[$icoName]
+    if (-not $refMean.ContainsKey($icoName)) { Report 'FAIL' "icon/$ext" "no reference mean for $icoName"; continue }
+    $want = $refMean[$icoName]
     $mean = Get-RenderedMean $ext
     $where = Probe-Location $ext
     if ($null -eq $mean) {
@@ -208,11 +221,12 @@ foreach ($ext in $map.Keys) {
     }
     $dist = Get-ColorDistance $mean $want
     $means[$ext] = $mean
-    $shown = "rgb({0:N0},{1:N0},{2:N0}) d={3:N0}" -f $mean[0], $mean[1], $mean[2], $dist
-    if ($dist -le 45) {
+    $shown = "rgb({0:N0},{1:N0},{2:N0}) vs ref rgb({3:N0},{4:N0},{5:N0}) d={6:N0}" -f `
+        $mean[0], $mean[1], $mean[2], $want[0], $want[1], $want[2], $dist
+    if ($dist -le 25) {
         Report 'PASS' "icon/$ext" "$shown  (loc=$where)"
     } else {
-        Report 'FAIL' "icon/$ext" "$shown  expect $icoName brand colour (loc=$where)"
+        Report 'FAIL' "icon/$ext" "$shown  expect render of $icoName (loc=$where)"
     }
 }
 
