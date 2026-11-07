@@ -42,7 +42,7 @@ export const Config: z<Config> = z.object({
   createShortcut: z.boolean().default(true),
   installDir: z.string().default(defaultInstallDir()),
   shortcutName: z.string().default('DeepSeek Harness Window'),
-  repoSlug: z.string().default('ZichengGurrr/dsh-window'),
+  repoSlug: z.string().default('anglesccs/dsh-window'),
 })
 
 /**
@@ -56,6 +56,6 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     createShortcut: config.createShortcut ?? true,
     installDir: config.installDir ?? defaultInstallDir(),
     shortcutName: config.shortcutName ?? 'DeepSeek Harness Window',
-    repoSlug: config.repoSlug ?? 'ZichengGurrr/dsh-window',
+    repoSlug: config.repoSlug ?? 'anglesccs/dsh-window',
   }
 }

@@ -1,5 +1,5 @@
 {
-  "name": "dsh-window",
+  "name": "dsh-window-community",
   "description": "DeepSeek Harness Windows desktop shell (WebView2) installer: fetches the app zip from GitHub Releases, creates a desktop shortcut, and exposes the desktop_launch tool.",
   "version": "0.1.0",
   "license": "MIT",
@@ -42,9 +42,9 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ZichengGurrr/dsh-window.git"
+    "url": "git+https://github.com/anglesccs/dsh-window.git"
   },
-  "homepage": "https://github.com/ZichengGurrr/dsh-window",
+  "homepage": "https://github.com/anglesccs/dsh-window",
   "keywords": [
     "deepseek",
     "harness",

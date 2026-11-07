@@ -4,14 +4,14 @@ DeepSeek Harness 一条命令装齐三件事：
 
 | 组件 | 作用 | 来源 |
 | --- | --- | --- |
-| **桌面** `dsh-window` | Windows 原生独立窗口（WebView2）：自动从 GitHub Releases 安装 exe、创建快捷方式、注册 `desktop_launch` 工具 | 本套件内置（[src/](src/)，与 [../plugin](../plugin) 同源） |
+| **桌面** `dsh-window-kit`（内置桌面壳） | Windows 原生独立窗口（WebView2）：自动从 GitHub Releases 安装 exe、创建快捷方式、注册 `desktop_launch` 工具 | 本套件内置（[src/](src/)，与 [../plugin](../plugin) 同源） |
 | **眼睛** `dsh-plugin-deepeye` | 视觉插件：为纯文本模型外挂看图能力（vision_describe / vision_ocr / vision_ask / vision_layout / vision_clipboard），默认智谱 **GLM-4V-Flash** | [Favio8/dsh-plugin-deepeye](https://github.com/Favio8/dsh-plugin-deepeye) |
 | **嘴巴** `@nn12138/dsh-voice` | 语音输入：输入框麦克风按钮（或 Ctrl+Space）说话 → 文本进输入框，纯输入、与 agent preset 解耦 | [3274375092/dsh-voice](https://github.com/3274375092/dsh-voice) |
 
 ## 安装（一条命令）
 
 ```sh
-dsh plugin --profile web add github:ZichengGurrr/dsh-window#path:/kit
+dsh plugin --profile web add github:anglesccs/dsh-window#path:/kit
 ```
 
 重启 `dsh web`（或刷新页面）后生效。
@@ -60,7 +60,7 @@ dsh-voice-models        # 下载模型 ~100MB
 
 插件激活时自动从 GitHub Releases 安装应用并创建桌面快捷方式「DeepSeek Harness Window」，版本更新会自动升级；对话里说"打开桌面应用"即可拉起。
 
-> 本套件已内置桌面安装器，无需再单独安装 [dsh-window 插件](../plugin)（重复安装会冲突，若已装请先 `dsh plugin --profile web remove dsh-window`）。
+> 本套件已内置桌面安装器，**不要再**同时安装独立的 [`dsh-window-community` 插件](../plugin)：两者会各自注册 `desktop_launch` 并重复安装同一份 exe。已装的话先 `dsh plugin --profile web remove dsh-window-community`（老版本命令里的 `dsh-window` 也一并移除）。
 
 ## 卸载
 
@@ -68,11 +68,14 @@ dsh-voice-models        # 下载模型 ~100MB
 dsh plugin --profile web remove dsh-window-kit
 ```
 
+桌面应用本身也随套件一起卸载：在 Windows 上运行 `DeepSeek Harness Window.exe --uninstall`（会清掉快捷方式、注册表项、安装目录里的配置）。
+
 ## 说明
 
 - 本套件是聚合 bundle：本身不含业务代码，只负责安装三个插件并写入默认配置。
 - 各组件均为 MIT 协议，由各自作者维护；本套件与 DeepSeek 公司无隶属关系。
 - npm 发布后安装命令可简化为 `dsh plugin --profile web add dsh-window-kit`。
+- 桌面壳支持 `serverMode: "external"`：只连远程 DSH（`externalUrl`），不解析本地 Node、不启动/结束任何进程；纯客户端场景不需要 Node 环境。
 
 ## License
 

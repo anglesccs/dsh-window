@@ -5,7 +5,7 @@
  */
 
 /** Cordis plugin name; keep this stable after publishing. */
-export const name = 'dsh-window'
+export const name = 'dsh-window-community'
 
 /** Services required before load: the model-facing tool registry. */
 export const inject: string[] = ['tools']

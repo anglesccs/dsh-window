@@ -1,0 +1,38 @@
+name: accept
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  accept:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: powershell
+        run: .\build.ps1 -Version 1.3.0
+
+      - name: Behavior acceptance
+        shell: powershell
+        run: .\ci\accept_behavior_windows.ps1 -Source "${{ github.workspace }}\dist" -ServeLocal
+
+      # The `env` context only holds values declared in this workflow, so
+      # ${{ env.LOCALAPPDATA }} is empty unless it is published first.
+      - name: Publish LOCALAPPDATA
+        if: always()
+        shell: powershell
+        run: |
+          "LOCALAPPDATA=$env:LOCALAPPDATA" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accept-logs
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}\dshw-accept
+            ${{ env.LOCALAPPDATA }}\DeepSeekHarnessWindow

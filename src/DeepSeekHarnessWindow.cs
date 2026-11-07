@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -18,12 +19,14 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyDescription("DeepSeek Harness standalone window (WebView2)")]
 [assembly: AssemblyCompany("Community project, not affiliated with DeepSeek")]
 [assembly: AssemblyProduct("DeepSeek Harness Window")]
-[assembly: AssemblyVersion("1.2.2.0")]
-[assembly: AssemblyFileVersion("1.2.2.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
 
 internal static class Program
 {
     private const string AppTitle = "DeepSeek Harness";
+    private const string AppVersion = "1.3.0";
+    private const string ConfigFileName = "dsh-window.config.json";
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 3080;
     private const string PickerPatch =
@@ -41,6 +44,8 @@ internal static class Program
     private static string appUrl;
     private static Process spawnedServer;
     private static Mutex singleInstance;
+    private static bool urlValid = true;
+    private static bool configInvalid;
 
     internal static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -65,48 +70,108 @@ internal static class Program
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
             // Installer mode runs before any runtime resolution so it also
-            // works on machines without Node/DSH installed.
-            if (install)
+            // works on machines without Node/DSH installed. --check always
+            // wins: it must stay headless (no dialogs at all).
+            if (install && !checkOnly)
                 return RunInstall(appDir) ? 0 : 1;
-            if (uninstall)
+            if (uninstall && !checkOnly)
                 return RunUninstall() ? 0 : 1;
 
-            paths = ResolvePaths(appDir, localAppData);
-            config = LoadConfig(Path.Combine(appDir, "dsh-window.config.json"));
-            appUrl = "http://" + config.Host + ":" + config.Port.ToString(CultureInfo.InvariantCulture) + "/";
+            // Configuration first: the mode it selects decides whether the
+            // local Node/DSH runtime is needed at all.
+            string configPath = Path.Combine(appDir, ConfigFileName);
+            config = LoadConfig(configPath);
+            appUrl = BuildAppUrl(config, out urlValid);
+            // In external mode the effective target is the URL, so report
+            // hostIsLocal for that host instead of the unused `host` key.
+            if (IsExternalMode(config))
+                config.HostIsLocal = UrlHostIsLocal(appUrl);
+            FlushConfigWarnings();
             patchPath = Path.Combine(localAppData, "DeepSeekHarnessLauncher", "directory-picker.patch.yml");
 
-            Log("start, url=" + appUrl + ", portable=" + paths.NodeExe.StartsWith(appDir, StringComparison.OrdinalIgnoreCase));
-
             if (checkOnly)
-                return 0;
+                return RunCheck(configPath, args);
 
-            Directory.CreateDirectory(Path.GetDirectoryName(patchPath));
-            File.WriteAllText(patchPath, PickerPatch);
+            if (IsExternalMode(config))
+            {
+                Log("start, url=" + appUrl + ", mode=external");
+            }
+            else
+            {
+                if (!config.HostIsLocal)
+                {
+                    Log("refuse to spawn: host " + config.Host + " is not a local address");
+                    if (noWindow)
+                        return 3;
+                    return RunWindow(null, false);
+                }
+                // Local mode needs the runtime only when something has to be
+                // started; an already-running service needs no local Node.
+                bool alreadyOnline = IsOnline(appUrl, 1200);
+                try
+                {
+                    paths = ResolvePaths(appDir, localAppData);
+                }
+                catch (Exception error)
+                {
+                    Log("runtime resolution failed: " + error.Message);
+                    if (!alreadyOnline)
+                    {
+                        if (noWindow)
+                            return 3;
+                        MessageBox.Show(error.Message, AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return 1;
+                    }
+                }
+                Log("start, url=" + appUrl + ", mode=local, runtime=" + (paths != null) +
+                    ", online=" + alreadyOnline);
+
+                // The picker overlay is only consumed by the local spawn.
+                if (paths != null)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(patchPath));
+                    File.WriteAllText(patchPath, PickerPatch);
+                }
+            }
 
             bool serverReady = EnsureServer();
 
             if (noWindow)
                 return serverReady ? 0 : 3;
 
-            bool createdNew;
-            singleInstance = new Mutex(true, @"Local\DeepSeekHarnessWindow.v2", out createdNew);
-            if (!createdNew)
-            {
-                FocusExistingInstance();
-                return 0;
-            }
-
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm(spawnedServer, appUrl, serverReady, config.KillServerOnClose, config.CloseToTray));
-            return 0;
+            return RunWindow(spawnedServer, serverReady);
         }
         catch (Exception error)
         {
+            if (HasFlag(args, "--check") || HasFlag(args, "--no-window") || HasFlag(args, "--no-open"))
+            {
+                // Headless modes must never block on a modal dialog.
+                Log("headless failure: " + error.Message);
+                return HasFlag(args, "--check") ? 2 : 1;
+            }
             MessageBox.Show(error.Message, AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
+    }
+
+    /// <summary>Shows the main window (single instance) and runs the message loop.</summary>
+    private static int RunWindow(Process ownedServer, bool serverReady)
+    {
+        bool createdNew;
+        singleInstance = new Mutex(true, @"Local\DeepSeekHarnessWindow.v2", out createdNew);
+        if (!createdNew)
+        {
+            FocusExistingInstance();
+            return 0;
+        }
+
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        // Closing may only stop a server this process owns and only in local mode.
+        bool canKill = config.KillServerOnClose && !IsExternalMode(config) && config.HostIsLocal;
+        Application.Run(new MainForm(ownedServer, appUrl, serverReady, canKill,
+            config.CloseToTray, IsExternalMode(config)));
+        return 0;
     }
 
     internal static void Log(string message)
@@ -176,6 +241,12 @@ internal static class Program
     {
         if (IsOnline(appUrl, 1200))
             return true;
+        // External mode never touches local processes.
+        if (IsExternalMode(config) || !config.HostIsLocal || paths == null)
+        {
+            Log("server unreachable, not spawning (external mode / remote host / no runtime)");
+            return false;
+        }
         if (spawnedServer == null || spawnedServer.HasExited)
             spawnedServer = StartHarness();
         return WaitFor(appUrl, config.WaitTimeoutMs);
@@ -251,6 +322,168 @@ internal static class Program
         return false;
     }
 
+    private static string GetArgValue(string[] args, string flag)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            string arg = args[i];
+            if (string.Equals(arg, flag, StringComparison.OrdinalIgnoreCase))
+                return i + 1 < args.Length ? args[i + 1] : "";
+            if (arg.StartsWith(flag + "=", StringComparison.OrdinalIgnoreCase))
+                return arg.Substring(flag.Length + 1);
+        }
+        return null;
+    }
+
+    // ---- headless --check ----
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AttachConsole(int processId);
+
+    /// <summary>Headless self-check: no window, no WebView2, no process spawn,
+    /// no modal dialog. Exit 0 when ok, 2 otherwise.</summary>
+    private static int RunCheck(string configPath, string[] args)
+    {
+        bool configFound = File.Exists(configPath);
+        List<string> problems = new List<string>();
+        bool runtimeAvailable = false;
+        string nodeExe = "";
+        string dshEntry = "";
+
+        if (configInvalid)
+            AddProblem(problems, "invalid-config");
+
+        if (!urlValid)
+            AddProblem(problems, "invalid-url");
+
+        if (IsExternalMode(config))
+        {
+            // External mode never resolves the local runtime.
+            if (urlValid && !IsOnline(appUrl, 2500))
+                AddProblem(problems, "port-unreachable");
+        }
+        else if (!config.HostIsLocal)
+        {
+            // Spawning against a remote host can never bind; refuse instead of
+            // launching a node process that is doomed to EADDRNOTAVAIL.
+            AddProblem(problems, "refuse-remote-host-in-local-mode");
+        }
+        else
+        {
+            // Local mode is the only mode that resolves the runtime.
+            bool online = urlValid && IsOnline(appUrl, 1500);
+            try
+            {
+                ResolvedPaths resolved = ResolvePaths(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+                runtimeAvailable = true;
+                nodeExe = resolved.NodeExe;
+                dshEntry = resolved.DshEntry;
+            }
+            catch
+            {
+                AddProblem(problems, "runtime-missing");
+            }
+            if (!online)
+                AddProblem(problems, "port-unreachable");
+        }
+
+        bool ok = problems.Count == 0;
+        Dictionary<string, object> report = new Dictionary<string, object>();
+        report["version"] = AppVersion;
+        report["serverMode"] = config.ServerMode;
+        report["url"] = appUrl;
+        report["configPath"] = configPath;
+        report["configFound"] = configFound;
+        Dictionary<string, object> runtime = new Dictionary<string, object>();
+        runtime["available"] = runtimeAvailable;
+        runtime["nodeExe"] = nodeExe;
+        runtime["dshEntry"] = dshEntry;
+        report["runtime"] = runtime;
+        report["hostIsLocal"] = config.HostIsLocal;
+        report["problems"] = problems;
+        report["ok"] = ok;
+
+        string json = new JavaScriptSerializer().Serialize(report);
+        Log("check: ok=" + ok + ", problems=" + problems.Count);
+
+        string outPath = GetArgValue(args, "--out");
+        if (!string.IsNullOrEmpty(outPath))
+        {
+            try
+            {
+                string full = Path.GetFullPath(outPath);
+                string dir = Path.GetDirectoryName(full);
+                if (!string.IsNullOrEmpty(dir))
+                    Directory.CreateDirectory(dir);
+                // UTF-8 without BOM: File.WriteAllText(UTF8Encoding(false)).
+                File.WriteAllText(full, json, new UTF8Encoding(false));
+            }
+            catch (Exception error)
+            {
+                Log("check report write failed: " + error.Message);
+            }
+        }
+
+        WriteConsole(report);
+        return ok ? 0 : 2;
+    }
+
+    private static void AddProblem(List<string> problems, string problem)
+    {
+        if (!problems.Contains(problem))
+            problems.Add(problem);
+    }
+
+    /// <summary>Attaches to the parent console (the exe is /target:winexe) and
+    /// prints the report; silently does nothing when there is no console.</summary>
+    private static void WriteConsole(Dictionary<string, object> report)
+    {
+        StringBuilder text = new StringBuilder();
+        text.AppendLine("dsh-window " + report["version"] + " check");
+        text.AppendLine("  serverMode : " + report["serverMode"]);
+        text.AppendLine("  url        : " + report["url"]);
+        text.AppendLine("  config     : " + report["configPath"] +
+            (Convert.ToBoolean(report["configFound"]) ? "" : " (missing)"));
+        text.AppendLine("  runtime    : " + Convert.ToBoolean(
+            ((Dictionary<string, object>)report["runtime"])["available"]));
+        text.AppendLine("  ok         : " + report["ok"]);
+        List<string> problems = report["problems"] as List<string>;
+        if (problems != null && problems.Count > 0)
+            text.AppendLine("  problems   : " + string.Join(", ", problems.ToArray()));
+
+        // A winexe starts without a console; attach to the parent's when there
+        // is one. AttachConsole returns false when already attached or when
+        // there is no parent console at all.
+        AttachConsole(-1);
+        try
+        {
+            Console.Out.Write(text.ToString());
+            Console.Out.Flush();
+        }
+        catch
+        {
+            try
+            {
+                // Stdout is unusable for a winexe; fall back to the console
+                // device itself (name concatenated to avoid a dollar-quote).
+                string consoleDevice = "CONOUT" + (char)36;
+                using (FileStream device = new FileStream(consoleDevice, FileMode.Open, FileAccess.Write))
+                using (StreamWriter console = new StreamWriter(device, new UTF8Encoding(false)))
+                {
+                    console.NewLine = "\r\n";
+                    console.Write(text.ToString());
+                    console.Flush();
+                }
+            }
+            catch
+            {
+                // No console at all: stay silent, the JSON file is authoritative.
+            }
+        }
+    }
+
     private sealed class ResolvedPaths
     {
         public string NodeExe;
@@ -288,24 +521,98 @@ internal static class Program
         public bool KillServerOnClose = true;
         public string PermissionMode = "danger-full-access";
         public bool CheckUpdates = true;
-        public string UpdateRepo = "ZichengGurrr/dsh-window";
+        public string UpdateRepo = "anglesccs/dsh-window";
         public bool CloseToTray = false;
         public bool LogFile = false;
+        public string ServerMode = "local";
+        public string ExternalUrl = "";
+        public bool HostIsLocal = true;
+    }
+
+    private static readonly List<string> configWarnings = new List<string>();
+
+    /// <summary>Emits warnings collected while reading the config (before the
+    /// log sink is usable they are simply kept).</summary>
+    private static void FlushConfigWarnings()
+    {
+        foreach (string warning in configWarnings)
+            Log("config warning: " + warning);
+        configWarnings.Clear();
+    }
+
+    /// <summary>True when the host resolves to this machine, so spawning a
+    /// local `dsh --host &lt;host&gt;` can actually bind.</summary>
+    private static bool IsLocalHost(string host)
+    {
+        if (host == null)
+            return false;
+        string value = host.Trim().ToLowerInvariant();
+        return value == "127.0.0.1" || value == "localhost" || value == "::1" ||
+            value == "[::1]" || value == "0.0.0.0" || value == "::" || value == "[::]";
+    }
+
+    private static bool IsExternalMode(LauncherConfig cfg)
+    {
+        return cfg != null && string.Equals(cfg.ServerMode, "external", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>True when the URL points at this machine.</summary>
+    private static bool UrlHostIsLocal(string url)
+    {
+        try
+        {
+            return IsLocalHost(new Uri(url).Host);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Window URL: externalUrl wins verbatim (one trailing slash is
+    /// added); otherwise http://host:port/.</summary>
+    private static string BuildAppUrl(LauncherConfig cfg, out bool valid)
+    {
+        valid = true;
+        string external = cfg.ExternalUrl == null ? "" : cfg.ExternalUrl.Trim();
+        if (external.Length > 0)
+        {
+            Uri parsed;
+            if (!Uri.TryCreate(external, UriKind.Absolute, out parsed) ||
+                (parsed.Scheme != "http" && parsed.Scheme != "https"))
+            {
+                valid = false;
+                configWarnings.Add("invalid externalUrl: " + external);
+                return external;
+            }
+            return external.EndsWith("/", StringComparison.Ordinal) ? external : external + "/";
+        }
+        return "http://" + cfg.Host + ":" + cfg.Port.ToString(CultureInfo.InvariantCulture) + "/";
     }
 
     private static LauncherConfig LoadConfig(string path)
     {
         LauncherConfig cfg = new LauncherConfig();
+        configWarnings.Clear();
+        configInvalid = false;
         if (!File.Exists(path))
+        {
+            cfg.HostIsLocal = IsLocalHost(cfg.Host);
             return cfg;
+        }
         try
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             Dictionary<string, object> map =
                 serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
             if (map == null)
+            {
+                cfg.HostIsLocal = IsLocalHost(cfg.Host);
                 return cfg;
+            }
             if (map.ContainsKey("host") && map["host"] is string) cfg.Host = (string)map["host"];
+            if (cfg.Host == null || cfg.Host.Trim().Length == 0)
+                cfg.Host = DefaultHost;
             if (map.ContainsKey("port")) cfg.Port = Convert.ToInt32(map["port"]);
             if (map.ContainsKey("waitTimeoutMs")) cfg.WaitTimeoutMs = Convert.ToInt32(map["waitTimeoutMs"]);
             if (map.ContainsKey("killServerOnClose")) cfg.KillServerOnClose = Convert.ToBoolean(map["killServerOnClose"]);
@@ -316,11 +623,47 @@ internal static class Program
                 cfg.UpdateRepo = (string)map["updateRepo"];
             if (map.ContainsKey("closeToTray")) cfg.CloseToTray = Convert.ToBoolean(map["closeToTray"]);
             if (map.ContainsKey("logFile")) cfg.LogFile = Convert.ToBoolean(map["logFile"]);
+
+            if (map.ContainsKey("externalUrl") && map["externalUrl"] is string)
+                cfg.ExternalUrl = ((string)map["externalUrl"]).Trim();
+
+            string mode = "";
+            if (map.ContainsKey("serverMode"))
+            {
+                if (map["serverMode"] is string)
+                    mode = ((string)map["serverMode"]).Trim().ToLowerInvariant();
+                else
+                {
+                    mode = "?";
+                    configWarnings.Add("serverMode is not a string, falling back to local");
+                }
+            }
+            if (mode == "external")
+                cfg.ServerMode = "external";
+            else if (mode == "local" || mode.Length == 0)
+                cfg.ServerMode = "local";
+            else
+            {
+                cfg.ServerMode = "local";
+                if (mode != "?")
+                    configWarnings.Add("invalid serverMode '" + mode + "', falling back to local");
+            }
+            // A non-empty externalUrl always means external mode.
+            if (cfg.ExternalUrl.Length > 0)
+            {
+                if (cfg.ServerMode == "local" && mode == "local")
+                    configWarnings.Add("serverMode=local ignored because externalUrl is set");
+                cfg.ServerMode = "external";
+            }
         }
         catch
         {
             // A broken config file falls back to defaults; never block startup.
+            configWarnings.Add("invalid config file, using defaults");
+            configInvalid = true;
+            cfg = new LauncherConfig();
         }
+        cfg.HostIsLocal = IsLocalHost(cfg.Host);
         return cfg;
     }
 
@@ -354,7 +697,7 @@ internal static class Program
         return false;
     }
 
-    private static bool IsOnline(string url, int timeoutMs)
+    internal static bool IsOnline(string url, int timeoutMs)
     {
         try
         {
@@ -364,6 +707,17 @@ internal static class Program
             request.ReadWriteTimeout = timeoutMs;
             using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
                 return (int)response.StatusCode >= 200 && (int)response.StatusCode < 500;
+        }
+        catch (WebException error)
+        {
+            // A 3xx/4xx (login page, auth challenge) still proves the server
+            // is up; only transport failures and 5xx count as offline.
+            HttpWebResponse failed = error.Response as HttpWebResponse;
+            if (failed == null)
+                return false;
+            int status = (int)failed.StatusCode;
+            failed.Close();
+            return status < 500;
         }
         catch
         {
@@ -462,6 +816,11 @@ internal static class Program
                 if (File.Exists(source))
                     File.Copy(source, Path.Combine(target, file), true);
             }
+            // Ship the config beside the exe so an external-mode install
+            // keeps pointing at the same remote server after installation.
+            string configSource = Path.Combine(appDir, ConfigFileName);
+            if (File.Exists(configSource))
+                File.Copy(configSource, Path.Combine(target, ConfigFileName), true);
             string exePath = Path.Combine(target, ExeName);
             if (!File.Exists(exePath))
                 throw new InvalidOperationException("未找到应用文件，请把 4 个程序文件与安装器放在同一目录。");
@@ -487,8 +846,10 @@ internal static class Program
             }
 
             WriteInstallLog("installed to " + target + " (v" + version.ToString(3) + ")");
+            bool configCopied = File.Exists(Path.Combine(target, ConfigFileName));
             MessageBox.Show(
-                "安装完成。\n\n位置：" + target + "\n\n已在桌面和开始菜单创建快捷方式。",
+                "安装完成。\n\n位置：" + target + "\n\n已在桌面和开始菜单创建快捷方式。" +
+                (configCopied ? "\n\n配置 dsh-window.config.json 已一并安装。" : ""),
                 AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return true;
         }
@@ -524,6 +885,7 @@ internal static class Program
                     foreach (string file in ShipFiles)
                         TryDelete(Path.Combine(target, file));
                     TryDelete(Path.Combine(target, "installed-version.txt"));
+                    TryDelete(Path.Combine(target, ConfigFileName));
                     if (Directory.GetFileSystemEntries(target).Length == 0)
                     {
                         Directory.Delete(target);
@@ -538,6 +900,7 @@ internal static class Program
             WriteInstallLog("uninstalled, dir removed=" + removedDir);
             MessageBox.Show(
                 "已卸载。快捷方式和注册表项已移除。" +
+                "\n配置（dsh-window.config.json）已一并清除。" +
                 (removedDir ? "\n安装目录已删除。" : "\n安装目录仍有其它文件，未删除。"),
                 AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return true;
@@ -600,20 +963,27 @@ internal sealed class MainForm : Form
     private readonly Process ownedServer;
     private readonly bool killServerOnClose;
     private readonly bool closeToTray;
+    private readonly bool externalMode;
     private readonly string webUrl;
     private bool serverReady;
     private bool updateCheckQueued;
     private bool reallyExit;
     private NotifyIcon trayIcon;
     private bool trayBalloonShown;
+    private readonly System.Windows.Forms.Timer retryTimer;
+    private int retryCount;
+    private bool retryProbeRunning;
+    private bool errorPageShown;
 
-    public MainForm(Process ownedServer, string webUrl, bool serverReady, bool killServerOnClose, bool closeToTray)
+    public MainForm(Process ownedServer, string webUrl, bool serverReady, bool killServerOnClose,
+        bool closeToTray, bool externalMode)
     {
         this.ownedServer = ownedServer;
         this.webUrl = webUrl;
         this.serverReady = serverReady;
         this.killServerOnClose = killServerOnClose;
         this.closeToTray = closeToTray;
+        this.externalMode = externalMode;
 
         Text = ProgramTitle;
         MinimumSize = new Size(800, 560);
@@ -632,8 +1002,13 @@ internal sealed class MainForm : Form
         if (closeToTray)
             SetupTray();
 
+        retryTimer = new System.Windows.Forms.Timer();
+        retryTimer.Tick += OnRetryTimerTick;
+
         Load += OnLoad;
         FormClosed += OnFormClosed;
+        // Waking the machine is a good moment to re-probe a remote server.
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
     }
 
     private const string ProgramTitle = "DeepSeek Harness";
@@ -740,9 +1115,14 @@ internal sealed class MainForm : Form
             RestoreWindowState();
 
             if (serverReady)
+            {
+                errorPageShown = false;
                 webView.CoreWebView2.Navigate(webUrl);
+            }
             else
-                webView.CoreWebView2.NavigateToString(BuildErrorPage());
+            {
+                ShowErrorPageAndScheduleRetry();
+            }
         }
         catch (Exception error)
         {
@@ -757,7 +1137,24 @@ internal sealed class MainForm : Form
 
     private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
     {
-        if (!e.IsSuccess || updateCheckQueued || !serverReady)
+        if (!e.IsSuccess)
+        {
+            // Navigation itself failed (remote went away mid-flight).
+            serverReady = false;
+            Program.Log("navigation failed: " + e.WebErrorStatus);
+            if (!errorPageShown)
+                ShowErrorPageAndScheduleRetry();
+            return;
+        }
+        // NavigateToString also completes "successfully"; never treat our own
+        // error page as a restored connection.
+        if (errorPageShown)
+            return;
+        // A successful navigation means the connection is back: reset backoff.
+        retryCount = 0;
+        retryTimer.Stop();
+        serverReady = true;
+        if (updateCheckQueued)
             return;
         updateCheckQueued = true;
         Program.Log("navigation completed, queueing update check");
@@ -810,6 +1207,17 @@ internal sealed class MainForm : Form
 
     private string BuildErrorPage()
     {
+        string heading = externalMode ? "连不上远程 DeepSeek Harness 服务" : "DeepSeek Harness 服务没有响应";
+        string safeUrl = webUrl.Replace("\"", "%22");
+        string body = externalMode
+            ? "目标地址：" + safeUrl + "。请确认远程机器上的 DSH 已启动、网络可达。"
+            : "启动本地服务后没有在预期时间内连上。点下面的按钮再试一次。";
+        string retryLine = "";
+        if (retryCount > 0)
+        {
+            retryLine = "<p id=\"dshw-retry\">自动重试：第 " + retryCount.ToString(CultureInfo.InvariantCulture) +
+                " 次，" + NextRetrySeconds(retryCount).ToString(CultureInfo.InvariantCulture) + " 秒后</p>";
+        }
         return
             "<html><head><meta charset=\"utf-8\"><title>连接失败 - " + ProgramTitle + "</title>" +
             "<style>body{font-family:'Segoe UI',system-ui,sans-serif;background:#f5f6f8;display:flex;" +
@@ -817,13 +1225,95 @@ internal sealed class MainForm : Form
             ".card{background:#fff;padding:40px 48px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);" +
             "max-width:480px;text-align:center}h1{font-size:20px;margin:0 0 12px}" +
             "p{color:#59636e;font-size:14px;line-height:1.6;margin:0 0 24px}" +
+            "#dshw-retry{font-size:13px;color:#8a6d3b;margin:-12px 0 24px}" +
             "button{background:#2f6fed;color:#fff;border:none;border-radius:8px;padding:10px 28px;" +
             "font-size:14px;cursor:pointer}button:hover{background:#2557c0}" +
             "a{display:block;margin-top:16px;color:#59636e;font-size:13px}</style></head><body>" +
-            "<div class=\"card\"><h1>DeepSeek Harness 服务没有响应</h1>" +
-            "<p>启动本地服务后没有在预期时间内连上。点下面的按钮再试一次。</p>" +
+            "<div class=\"card\"><h1>" + heading + "</h1>" +
+            "<p>" + body + "</p>" +
+            retryLine +
             "<button onclick=\"window.chrome.webview.postMessage('retry')\">重试</button>" +
-            "<a href=\"" + webUrl + "\" target=\"_blank\">在浏览器中打开</a></div></body></html>";
+            "<a href=\"" + safeUrl + "\" target=\"_blank\">在浏览器中打开</a></div></body></html>";
+    }
+
+    /// <summary>Backoff schedule for automatic reconnects: 2, 5, 10, then 30s.</summary>
+    private static int NextRetrySeconds(int attempt)
+    {
+        if (attempt <= 1)
+            return 2;
+        if (attempt == 2)
+            return 5;
+        if (attempt == 3)
+            return 10;
+        return 30;
+    }
+
+    private void ShowErrorPageAndScheduleRetry()
+    {
+        if (webView.CoreWebView2 == null)
+            return;
+        retryCount++;
+        int seconds = NextRetrySeconds(retryCount);
+        Program.Log("retry #" + retryCount.ToString(CultureInfo.InvariantCulture) +
+            " in " + seconds.ToString(CultureInfo.InvariantCulture) + "s");
+        errorPageShown = true;
+        webView.CoreWebView2.NavigateToString(BuildErrorPage());
+        retryTimer.Stop();
+        retryTimer.Interval = seconds * 1000;
+        retryTimer.Start();
+    }
+
+    private void OnRetryTimerTick(object sender, EventArgs e)
+    {
+        retryTimer.Stop();
+        TryReconnect(true);
+    }
+
+    /// <summary>Probes the URL once; navigates when reachable, otherwise
+    /// re-renders the error page with the next backoff step.</summary>
+    private void TryReconnect(bool reschedule)
+    {
+        if (retryProbeRunning)
+            return;
+        retryProbeRunning = true;
+        // Probe off the UI thread: a dead host can take seconds to time out.
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            // External mode only probes; local mode may still need to
+            // (re)start the service it owns.
+            bool online = externalMode
+                ? Program.IsOnline(webUrl, 2500)
+                : Program.EnsureServer();
+            try
+            {
+                BeginInvoke((Action)delegate
+                {
+                    retryProbeRunning = false;
+                    ApplyProbeResult(online, reschedule);
+                });
+            }
+            catch
+            {
+                retryProbeRunning = false;
+            }
+        });
+    }
+
+    private void ApplyProbeResult(bool online, bool reschedule)
+    {
+        if (online)
+        {
+            // Do not reset the counter here: only a navigation that actually
+            // succeeded proves the connection is back.
+            serverReady = true;
+            errorPageShown = false;
+            if (webView.CoreWebView2 != null)
+                webView.CoreWebView2.Navigate(webUrl);
+            return;
+        }
+        serverReady = false;
+        if (reschedule)
+            ShowErrorPageAndScheduleRetry();
     }
 
     private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -832,11 +1322,31 @@ internal sealed class MainForm : Form
         {
             if (e.TryGetWebMessageAsString() != "retry")
                 return;
-            serverReady = Program.EnsureServer();
-            if (serverReady)
-                webView.CoreWebView2.Navigate(webUrl);
-            else
-                webView.CoreWebView2.Reload();
+            // Manual retry: reset the backoff, probe once, never spawn in
+            // external mode.
+            retryTimer.Stop();
+            retryCount = 0;
+            TryReconnect(true);
+        }
+        catch
+        {
+        }
+    }
+
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != PowerModes.Resume)
+            return;
+        Program.Log("power resume, immediate retry");
+        // SystemEvents raises this on its own thread; marshal to the UI thread.
+        try
+        {
+            BeginInvoke((Action)delegate
+            {
+                retryTimer.Stop();
+                retryCount = 0;
+                TryReconnect(true);
+            });
         }
         catch
         {
@@ -871,15 +1381,17 @@ internal sealed class MainForm : Form
         {
             if (!File.Exists(StatePath))
             {
-                StartPosition = FormStartPosition.CenterScreen;
-                Size = new Size(1440, 900);
+                ApplyFirstRunBounds();
                 return;
             }
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             Dictionary<string, object> state =
                 serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(StatePath, Encoding.UTF8));
             if (state == null)
+            {
+                ApplyFirstRunBounds();
                 return;
+            }
 
             int x = state.ContainsKey("x") ? Convert.ToInt32(state["x"]) : int.MinValue;
             int y = state.ContainsKey("y") ? Convert.ToInt32(state["y"]) : int.MinValue;
@@ -924,17 +1436,41 @@ internal sealed class MainForm : Form
             }
             else
             {
-                StartPosition = FormStartPosition.CenterScreen;
-                Size = new Size(1440, 900);
+                ApplyFirstRunBounds();
             }
             if (maximized)
                 WindowState = FormWindowState.Maximized;
         }
         catch
         {
-            StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(1440, 900);
+            ApplyFirstRunBounds();
         }
+    }
+
+    /// <summary>First run (or unusable state): 80% of the primary working area,
+    /// centered, never below MinimumSize and never larger than the area.</summary>
+    private void ApplyFirstRunBounds()
+    {
+        Screen primary = Screen.PrimaryScreen;
+        Rectangle area = primary != null ? primary.WorkingArea : Screen.FromPoint(Cursor.Position).WorkingArea;
+        int w = (int)Math.Round(area.Width * 0.8);
+        int h = (int)Math.Round(area.Height * 0.8);
+        if (w < MinimumSize.Width)
+            w = MinimumSize.Width;
+        if (h < MinimumSize.Height)
+            h = MinimumSize.Height;
+        if (w > area.Width)
+            w = area.Width;
+        if (h > area.Height)
+            h = area.Height;
+        int x = area.X + (area.Width - w) / 2;
+        int y = area.Y + (area.Height - h) / 2;
+        StartPosition = FormStartPosition.Manual;
+        Bounds = new Rectangle(x, y, w, h);
+        Program.Log("window bounds: x=" + x.ToString(CultureInfo.InvariantCulture) +
+            " y=" + y.ToString(CultureInfo.InvariantCulture) +
+            " w=" + w.ToString(CultureInfo.InvariantCulture) +
+            " h=" + h.ToString(CultureInfo.InvariantCulture));
     }
 
     /// <summary>System DPI ratio (primary monitor DPI / 96) for one-time
@@ -979,6 +1515,21 @@ internal sealed class MainForm : Form
     private void OnFormClosed(object sender, FormClosedEventArgs e)
     {
         Program.Log("form closed, disposing tray and owned server");
+        try
+        {
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        }
+        catch
+        {
+        }
+        try
+        {
+            retryTimer.Stop();
+            retryTimer.Dispose();
+        }
+        catch
+        {
+        }
         SaveWindowState();
         if (trayIcon != null)
         {

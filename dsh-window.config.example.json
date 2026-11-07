@@ -1,0 +1,9 @@
+{
+  "serverMode": "external",
+  "externalUrl": "http://192.168.78.2:3080/",
+  "waitTimeoutMs": 30000,
+  "killServerOnClose": false,
+  "closeToTray": true,
+  "checkUpdates": false,
+  "logFile": true
+}

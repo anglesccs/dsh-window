@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.2.2",
+    [string]$Version = "1.3.0",
     [string]$IconPath = "",
     [string]$WebView2Version = "1.0.4129.50",
     [string]$ExeName = "DeepSeek Harness Window.exe",
@@ -71,6 +71,9 @@ Remove-Item "$DistDir\*" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $lib "Microsoft.Web.WebView2.Core.dll") $DistDir
 Copy-Item (Join-Path $lib "Microsoft.Web.WebView2.WinForms.dll") $DistDir
 Copy-Item (Join-Path $native "WebView2Loader.dll") $DistDir
+# Ship the example config so the slim zip documents external-server mode.
+$exampleConfig = Join-Path $Root "dsh-window.config.example.json"
+if (Test-Path $exampleConfig) { Copy-Item $exampleConfig $DistDir }
 
 # Compile. (The launcher URL / port / patch overlay live in the .cs source;
 # edit src\DeepSeekHarnessWindow.cs to change them.)

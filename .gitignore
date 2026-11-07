@@ -4,3 +4,5 @@ dist/
 *.zip
 *.nupkg
 dist-portable/
+# Local runtime config (keep the checked-in example instead).
+dsh-window.config.json
