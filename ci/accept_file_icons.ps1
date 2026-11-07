@@ -117,59 +117,6 @@ foreach ($ico in ($map.Values | Sort-Object -Unique)) {
 
 Add-Type -AssemblyName System.Drawing
 
-# 判据基准 = 我们自己 .ico 在 32px 下的渲染均值（含白色字母）。
-# 拿「品牌底色」比「整图均值」会因白色字形被拉淡，实测 doc 偏 d=91，纯属判据错。
-$refMean = @{}
-foreach ($icoName in ($map.Values | Sort-Object -Unique)) {
-    $icoPath = Join-Path $IconDir $icoName
-    if (-not (Test-Path -LiteralPath $icoPath)) { continue }
-    try {
-        $refIcon = New-Object System.Drawing.Icon($icoPath, 32, 32)
-    } catch {
-        $refIcon = New-Object System.Drawing.Icon($icoPath)
-    }
-    try {
-        $refBmp = $refIcon.ToBitmap()
-        try { $refMean[$icoName] = Get-OpaqueMean $refBmp } finally { $refBmp.Dispose() }
-    } finally { $refIcon.Dispose() }
-}
-
-function Get-OpaqueMean([System.Drawing.Bitmap]$bmp) {
-    $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
-    $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
-        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-    try {
-        $len = $data.Stride * $bmp.Height
-        $buf = New-Object byte[] $len
-        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $len)
-    } finally {
-        $bmp.UnlockBits($data)
-    }
-    $r = 0L; $g = 0L; $b = 0L; $n = 0L
-    for ($i = 0; $i -lt $len; $i += 4) {
-        if ($buf[$i + 3] -ge 200) { $b += $buf[$i]; $g += $buf[$i + 1]; $r += $buf[$i + 2]; $n++ }
-    }
-    if ($n -eq 0) { return $null }
-    return @([double]($r / $n), [double]($g / $n), [double]($b / $n))
-}
-
-function Get-RenderedMean([string]$ext) {
-    $path = Join-Path $tmp ("probe" + $ext)
-    if (-not (Test-Path -LiteralPath $path)) { Set-Content -LiteralPath $path -Value '' -Encoding ASCII }
-    $h = [DshShellIcon]::ShellLargeIcon($path)
-    if ($h -eq [IntPtr]::Zero) { return $null }
-    try {
-        $bmp = [System.Drawing.Icon]::FromHandle($h).ToBitmap()
-        try { return Get-OpaqueMean $bmp } finally { $bmp.Dispose() }
-    } finally {
-        [void][DshShellIcon]::DestroyIcon($h)
-    }
-}
-
-function Get-ColorDistance($a, $b) {
-    return [math]::Sqrt([math]::Pow($a[0] - $b[0], 2) + [math]::Pow($a[1] - $b[1], 2) + [math]::Pow($a[2] - $b[2], 2))
-}
-
 # ---------------------------------------------------------------- 2) 安装前的基线（必须不等于我们的 ico）
 $baseline = @{}
 foreach ($ext in $map.Keys) { $baseline[$ext] = Probe-Location $ext }
@@ -208,6 +155,59 @@ if ($installCode -ne 0) {
 # ---------------------------------------------------------------- 4) 逐个扩展名断言
 # SHGFI_ICONLOCATION 对 .ico 来源会返回空路径（只剩索引），因此判据改为
 # 「Shell 实际渲染出来的图标颜色必须等于我们的品牌色」，比查注册表文本强得多。
+function Get-OpaqueMean([System.Drawing.Bitmap]$bmp) {
+    $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
+    $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+        $len = $data.Stride * $bmp.Height
+        $buf = New-Object byte[] $len
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $len)
+    } finally {
+        $bmp.UnlockBits($data)
+    }
+    $r = 0L; $g = 0L; $b = 0L; $n = 0L
+    for ($i = 0; $i -lt $len; $i += 4) {
+        if ($buf[$i + 3] -ge 200) { $b += $buf[$i]; $g += $buf[$i + 1]; $r += $buf[$i + 2]; $n++ }
+    }
+    if ($n -eq 0) { return $null }
+    return @([double]($r / $n), [double]($g / $n), [double]($b / $n))
+}
+
+function Get-RenderedMean([string]$ext) {
+    $path = Join-Path $tmp ("probe" + $ext)
+    if (-not (Test-Path -LiteralPath $path)) { Set-Content -LiteralPath $path -Value '' -Encoding ASCII }
+    $h = [DshShellIcon]::ShellLargeIcon($path)
+    if ($h -eq [IntPtr]::Zero) { return $null }
+    try {
+        $bmp = [System.Drawing.Icon]::FromHandle($h).ToBitmap()
+        try { return Get-OpaqueMean $bmp } finally { $bmp.Dispose() }
+    } finally {
+        [void][DshShellIcon]::DestroyIcon($h)
+    }
+}
+
+function Get-ColorDistance($a, $b) {
+    return [math]::Sqrt([math]::Pow($a[0] - $b[0], 2) + [math]::Pow($a[1] - $b[1], 2) + [math]::Pow($a[2] - $b[2], 2))
+}
+
+# 判据基准 = 我们自己 .ico 在 32px 下的渲染均值（含白色字母）。
+# 拿「品牌底色」比「整图均值」会因白色字形被拉淡，实测 doc 偏 d=91，纯属判据错。
+$refMean = @{}
+foreach ($icoName in ($map.Values | Sort-Object -Unique)) {
+    $icoPath = Join-Path $IconDir $icoName
+    if (-not (Test-Path -LiteralPath $icoPath)) { continue }
+    try {
+        $refIcon = New-Object System.Drawing.Icon($icoPath, 32, 32)
+    } catch {
+        $refIcon = New-Object System.Drawing.Icon($icoPath)
+    }
+    try {
+        $refBmp = $refIcon.ToBitmap()
+        try { $refMean[$icoName] = Get-OpaqueMean $refBmp } finally { $refBmp.Dispose() }
+    } finally { $refIcon.Dispose() }
+}
+
 $means = @{}
 foreach ($ext in $map.Keys) {
     $icoName = $map[$ext]
