@@ -60,6 +60,18 @@ public static class DshShellIcon
     [DllImport("shell32.dll")]
     public static extern void SHChangeNotify(int eventId, uint flags, IntPtr item1, IntPtr item2);
 
+    [DllImport("user32.dll")]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+
+    // Renders the icon the Shell would use for this file, as an HICON.
+    public static IntPtr ShellLargeIcon(string path)
+    {
+        SHFILEINFO fi = new SHFILEINFO();
+        const uint SHGFI_ICON = 0x100;
+        IntPtr ok = SHGetFileInfo(path, 0, ref fi, (uint)Marshal.SizeOf(fi), SHGFI_ICON);
+        return ok == IntPtr.Zero ? IntPtr.Zero : fi.hIcon;
+    }
+
     public const int SHCNE_ASSOCCHANGED = 0x08000000;
     public const uint SHCNF_IDLIST = 0x0000;
 
@@ -103,6 +115,50 @@ foreach ($ico in ($map.Values | Sort-Object -Unique)) {
     }
 }
 
+Add-Type -AssemblyName System.Drawing
+
+$expected = @{
+    'doc.ico' = @(0x2B, 0x57, 0x9A)   # Word blue
+    'xls.ico' = @(0x21, 0x73, 0x46)   # Excel green
+    'ppt.ico' = @(0xD2, 0x47, 0x26)   # PowerPoint orange-red
+}
+
+function Get-OpaqueMean([System.Drawing.Bitmap]$bmp) {
+    $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
+    $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+        $len = $data.Stride * $bmp.Height
+        $buf = New-Object byte[] $len
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $len)
+    } finally {
+        $bmp.UnlockBits($data)
+    }
+    $r = 0L; $g = 0L; $b = 0L; $n = 0L
+    for ($i = 0; $i -lt $len; $i += 4) {
+        if ($buf[$i + 3] -ge 200) { $b += $buf[$i]; $g += $buf[$i + 1]; $r += $buf[$i + 2]; $n++ }
+    }
+    if ($n -eq 0) { return $null }
+    return @([double]($r / $n), [double]($g / $n), [double]($b / $n))
+}
+
+function Get-RenderedMean([string]$ext) {
+    $path = Join-Path $tmp ("probe" + $ext)
+    if (-not (Test-Path -LiteralPath $path)) { Set-Content -LiteralPath $path -Value '' -Encoding ASCII }
+    $h = [DshShellIcon]::ShellLargeIcon($path)
+    if ($h -eq [IntPtr]::Zero) { return $null }
+    try {
+        $bmp = [System.Drawing.Icon]::FromHandle($h).ToBitmap()
+        try { return Get-OpaqueMean $bmp } finally { $bmp.Dispose() }
+    } finally {
+        [void][DshShellIcon]::DestroyIcon($h)
+    }
+}
+
+function Get-ColorDistance($a, $b) {
+    return [math]::Sqrt([math]::Pow($a[0] - $b[0], 2) + [math]::Pow($a[1] - $b[1], 2) + [math]::Pow($a[2] - $b[2], 2))
+}
+
 # ---------------------------------------------------------------- 2) 安装前的基线（必须不等于我们的 ico）
 $baseline = @{}
 foreach ($ext in $map.Keys) { $baseline[$ext] = Probe-Location $ext }
@@ -115,6 +171,19 @@ if ($alreadyMapped.Count -gt 0) {
     Report 'PASS' 'baseline' 'no extension points at our icons yet (precondition ok)'
 }
 
+# 负例自证：安装前 .docx 渲染出来的颜色必须不是 Word 蓝，否则下面的判据不可信
+$preMean = Get-RenderedMean '.docx'
+if ($null -eq $preMean) {
+    Report 'INFO' 'baseline colour' 'shell returned no icon before install (cannot pre-check)'
+} else {
+    $preDist = Get-ColorDistance $preMean $expected['doc.ico']
+    if ($preDist -gt 45) {
+        Report 'PASS' 'baseline colour' ("pre-install .docx rgb({0:N0},{1:N0},{2:N0}) d={3:N0} (not Word blue)" -f $preMean[0], $preMean[1], $preMean[2], $preDist)
+    } else {
+        Report 'FAIL' 'baseline colour' ("pre-install .docx already looks like Word blue (d={0:N0})" -f $preDist)
+    }
+}
+
 # ---------------------------------------------------------------- 3) 安装
 & powershell -NoProfile -ExecutionPolicy Bypass -File $InstallScript -IconDir $IconDir
 $installCode = $LASTEXITCODE
@@ -125,18 +194,48 @@ if ($installCode -ne 0) {
 }
 
 # ---------------------------------------------------------------- 4) 逐个扩展名断言
+# SHGFI_ICONLOCATION 对 .ico 来源会返回空路径（只剩索引），因此判据改为
+# 「Shell 实际渲染出来的图标颜色必须等于我们的品牌色」，比查注册表文本强得多。
+$means = @{}
 foreach ($ext in $map.Keys) {
-    $want = (Join-Path $IconDir $map[$ext]).ToLowerInvariant()
-    $got = Probe-Location $ext
-    if ($null -eq $got) {
-        Report 'FAIL' "icon/$ext" 'SHGetFileInfo returned nothing'
+    $icoName = $map[$ext]
+    $want = $expected[$icoName]
+    $mean = Get-RenderedMean $ext
+    $where = Probe-Location $ext
+    if ($null -eq $mean) {
+        Report 'FAIL' "icon/$ext" 'shell returned no icon'
         continue
     }
-    $gotPath = ($got -split ',')[0].ToLowerInvariant()
-    if ($gotPath -eq $want) {
-        Report 'PASS' "icon/$ext" "-> $got"
+    $dist = Get-ColorDistance $mean $want
+    $means[$ext] = $mean
+    $shown = "rgb({0:N0},{1:N0},{2:N0}) d={3:N0}" -f $mean[0], $mean[1], $mean[2], $dist
+    if ($dist -le 45) {
+        Report 'PASS' "icon/$ext" "$shown  (loc=$where)"
     } else {
-        Report 'FAIL' "icon/$ext" "-> $got (expect $want)"
+        Report 'FAIL' "icon/$ext" "$shown  expect $icoName brand colour (loc=$where)"
+    }
+}
+
+# 三组图标必须彼此可区分（防止「全套成同一个图标」也能蒙过单组判据）
+$groups = @{ 'doc.ico' = @(); 'xls.ico' = @(); 'ppt.ico' = @() }
+foreach ($ext in $means.Keys) { $groups[$map[$ext]] += , $means[$ext] }
+$avg = @{}
+foreach ($ico in $groups.Keys) {
+    $list = $groups[$ico]
+    if ($list.Count -eq 0) { continue }
+    $avg[$ico] = @(
+        ($list | ForEach-Object { $_[0] } | Measure-Object -Average).Average,
+        ($list | ForEach-Object { $_[1] } | Measure-Object -Average).Average,
+        ($list | ForEach-Object { $_[2] } | Measure-Object -Average).Average)
+}
+if ($avg.Count -eq 3) {
+    $d1 = Get-ColorDistance $avg['doc.ico'] $avg['xls.ico']
+    $d2 = Get-ColorDistance $avg['xls.ico'] $avg['ppt.ico']
+    $d3 = Get-ColorDistance $avg['doc.ico'] $avg['ppt.ico']
+    if ($d1 -gt 40 -and $d2 -gt 40 -and $d3 -gt 40) {
+        Report 'PASS' 'distinct' ("three groups differ: {0:N0}/{1:N0}/{2:N0}" -f $d1, $d2, $d3)
+    } else {
+        Report 'FAIL' 'distinct' ("groups too similar: {0:N0}/{1:N0}/{2:N0}" -f $d1, $d2, $d3)
     }
 }
 
