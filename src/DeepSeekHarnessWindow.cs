@@ -19,13 +19,13 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyDescription("DeepSeek Harness standalone window (WebView2)")]
 [assembly: AssemblyCompany("Community project, not affiliated with DeepSeek")]
 [assembly: AssemblyProduct("DeepSeek Harness Window")]
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
+[assembly: AssemblyVersion("1.4.1.0")]
+[assembly: AssemblyFileVersion("1.4.1.0")]
 
 internal static class Program
 {
     private const string AppTitle = "DeepSeek Harness";
-    private const string AppVersion = "1.4.0";
+    private const string AppVersion = "1.4.1";
     private const string ConfigFileName = "dsh-window.config.json";
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 3080;
@@ -50,6 +50,7 @@ internal static class Program
     private static Mutex singleInstance;
     private static bool urlValid = true;
     private static bool configInvalid;
+    private static bool logAlways;
 
     internal static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -69,6 +70,10 @@ internal static class Program
             bool noWindow = HasFlag(args, "--no-window") || HasFlag(args, "--no-open");
             bool install = HasFlag(args, "--install");
             bool uninstall = HasFlag(args, "--uninstall");
+            bool notifyTest = HasFlag(args, "--notify-test");
+            // Its lines must land in the log even when logFile is off, and even
+            // when the failure happens before the config is loaded.
+            logAlways = notifyTest;
 
             string appDir = AppDomain.CurrentDomain.BaseDirectory;
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -92,6 +97,11 @@ internal static class Program
                 config.HostIsLocal = UrlHostIsLocal(appUrl);
             FlushConfigWarnings();
             patchPath = Path.Combine(localAppData, "DeepSeekHarnessLauncher", "directory-picker.patch.yml");
+
+            // Diagnostic mode wins over every other headless mode: it needs the
+            // config only for the log sink, never the server or a window.
+            if (notifyTest)
+                return RunNotifyTest();
 
             if (checkOnly)
                 return RunCheck(configPath, args);
@@ -147,6 +157,12 @@ internal static class Program
         }
         catch (Exception error)
         {
+            if (HasFlag(args, "--notify-test"))
+            {
+                // Diagnostic entry: report and stay successful.
+                Log("notify test failed: " + error.Message);
+                return 0;
+            }
             if (HasFlag(args, "--check") || HasFlag(args, "--no-window") || HasFlag(args, "--no-open"))
             {
                 // Headless modes must never block on a modal dialog.
@@ -180,7 +196,10 @@ internal static class Program
 
     internal static void Log(string message)
     {
-        if (config == null || !config.LogFile)
+        // --notify-test is a diagnostic entry: its lines must reach the log even
+        // when the user's config keeps logFile off, otherwise a failure there
+        // leaves no trace at all.
+        if (!logAlways && (config == null || !config.LogFile))
             return;
         try
         {
@@ -337,6 +356,83 @@ internal static class Program
                 return arg.Substring(flag.Length + 1);
         }
         return null;
+    }
+
+    // ---- headless --notify-test ----
+
+    /// <summary>Diagnostic entry point: raises one balloon from a throwaway tray
+    /// icon and pumps messages for a few seconds so the shell can render it.
+    /// No window, no server, no spawn; always exits 0 so it stays scriptable on
+    /// machines where Windows itself blocks notifications.</summary>
+    private static int RunNotifyTest()
+    {
+        NotifyIcon icon = null;
+        Icon image = null;
+        bool ownImage = false;
+        try
+        {
+            icon = new NotifyIcon();
+            try
+            {
+                image = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                ownImage = image != null;
+            }
+            catch
+            {
+                // A missing exe icon must not stop the balloon from being asked for.
+            }
+            // The balloon needs some icon; the stock one keeps the request valid.
+            if (image == null)
+                image = SystemIcons.Application;
+            icon.Icon = image;
+            icon.Text = AppTitle;
+            icon.Visible = true;
+            icon.ShowBalloonTip(8000, AppTitle,
+                "通知自测：能看到这条气泡说明程序侧和系统侧都正常。", ToolTipIcon.Info);
+            Log("notify test: balloon requested");
+            // /target:winexe has no message loop of its own here, and a balloon
+            // needs a pump to reach the shell, so pump manually and bail out
+            // after 10s no matter what.
+            Stopwatch clock = Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < 10000)
+            {
+                Application.DoEvents();
+                Thread.Sleep(50);
+            }
+            Log("notify test: done after " +
+                clock.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture) + "ms");
+        }
+        catch (Exception error)
+        {
+            Log("notify test failed: " + error.Message);
+        }
+        finally
+        {
+            if (icon != null)
+            {
+                try
+                {
+                    icon.Visible = false;
+                    icon.Dispose();
+                }
+                catch
+                {
+                }
+            }
+            // The extracted icon is ours; SystemIcons.Application is shared and
+            // must not be disposed.
+            if (ownImage)
+            {
+                try
+                {
+                    image.Dispose();
+                }
+                catch
+                {
+                }
+            }
+        }
+        return 0;
     }
 
     // ---- headless --check ----
@@ -876,6 +972,9 @@ internal static class Program
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
@@ -885,6 +984,33 @@ internal static class Program
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    /// <summary>True only when this window is visible, not minimized and is the
+    /// OS foreground window. ContainsFocus cannot answer that: a form hidden to
+    /// the tray still reports focus, which silently killed the idle balloon.
+    /// An uncreated handle (0) counts as "not looking", so notifications still
+    /// fire instead of throwing.</summary>
+    internal static bool IsUserLookingAtWindow(Form form)
+    {
+        try
+        {
+            if (form == null || form.IsDisposed || !form.Visible)
+                return false;
+            if (form.WindowState == FormWindowState.Minimized)
+                return false;
+            // Reading Handle would create it; only compare an existing one.
+            if (!form.IsHandleCreated)
+                return false;
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground == IntPtr.Zero)
+                return false;
+            return foreground == form.Handle;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static void FocusExistingInstance()
     {
@@ -1540,15 +1666,17 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>A session just stopped running. Only a real running -> idle
-    /// transition with notifications enabled and the window out of focus
-    /// raises a balloon.</summary>
+    /// transition with notifications enabled and the window not in front of
+    /// the user raises a balloon.</summary>
     private void OnSessionIdle(bool transition)
     {
         bool wasRunning = sessionRunning;
         sessionRunning = false;
-        // A hidden-to-tray or minimized window never holds focus, so the
-        // focus check alone already covers "the user is not looking at it".
-        bool notify = transition && wasRunning && Program.SessionNotifyEnabled && !ContainsFocus;
+        // ContainsFocus lies for a window hidden to the tray (it keeps
+        // reporting true), so ask Win32 for the real foreground window and
+        // also require visibility and a non-minimized state.
+        bool notify = transition && wasRunning && Program.SessionNotifyEnabled &&
+            !Program.IsUserLookingAtWindow(this);
         if (notify)
             ShowSessionIdleNotification();
         Program.Log("session state: running=false, notify=" + (notify ? "yes" : "no"));

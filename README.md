@@ -1,4 +1,4 @@
-# DeepSeek Harness Window（社区版 · fork v1.4.0）
+# DeepSeek Harness Window（社区版 · fork v1.4.1）
 
 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 Web UI 装进 **Windows 原生独立窗口**（WebView2，即 Edge 内核）的极简启动器。
 
@@ -152,13 +152,14 @@ local 模式下 `host` 必须是本机地址（`127.0.0.1`、`localhost`、`::1`
 
 ## 会话完成通知
 
-长任务跑完时人往往不在窗口前，所以 v1.4.0 加了「跑完提醒」：会话从「正在跑」变成空闲，就弹一条 Windows 托盘气泡，点一下把窗口唤回来。
+长任务跑完时人往往不在窗口前，所以 v1.4.0 加了「跑完提醒」：会话从「正在跑」变成空闲，就弹一条 Windows 托盘气泡，点一下把窗口唤回来。v1.4.1 修正了「窗口是否在前台」的判定（原来用 `ContainsFocus`，窗口收进托盘时它仍返回 true，导致气泡从不发射），并加了 `--notify-test` 自测入口。
 
 - **靠 DOM 探测，不碰服务端**：WebView2 初始化后注入一小段脚本，按 `sessionRunningSelector` 轮询页面——DSH 的 chat 客户端在跑的时候会渲染类名带 `_running` 后缀的元素（CSS module 形如 `EvIC1a_running`），命中即视为「正在跑」。脚本只在状态**翻转**时往 C# 侧发消息，不占用服务端的 mux 协议。
 - **选择器可热修**：前端改类名不会让功能直接失效，把 `sessionRunningSelector` 改成新的选择器即可，不用等新版本。
-- **只在窗口失焦时弹**：正盯着窗口看就不打扰；窗口在后台、最小化到托盘、或已被 `closeToTray` 收起来时才弹。
+- **只在窗口不是前台时弹**：判定用的是 Windows 前台窗口（`GetForegroundWindow`），不是 WinForms 的焦点状态——窗口隐藏到托盘、最小化、被别的窗口盖住都算「没在看」，这时才弹。
 - **点击唤回**：气泡本身和托盘图标都可点，效果是显示窗口、还原尺寸、抢回焦点。
 - 默认关闭（`sessionNotify: false`）；探测脚本无论如何都会注入，`logFile` 打开时可在日志里看到 `session state: running=true` / `running=false, notify=yes|no`，方便确认是「没探测到」还是「探测到了但按配置没弹」。
+- **排查**：`DeepSeek Harness Window.exe --notify-test` 应立刻弹一条自测气泡；如果这条也不出现，说明是 Windows 通知设置拦的，不是程序。
 
 ## 命令行参数
 
@@ -167,6 +168,7 @@ local 模式下 `host` 必须是本机地址（`127.0.0.1`、`localhost`、`::1`
 | （无） | 确保服务在线，然后打开窗口 |
 | `--check [--out <path>]` | 无界面自检：不建窗口、不弹窗、不 spawn；external 模式只探 URL。`--out` 写 UTF-8 无 BOM 的 JSON 报告。退出码 0=通过 / 2=有问题 |
 | `--no-window` | 只确保服务在线，不打开窗口 |
+| `--notify-test` | 通知自测：不建窗口、不连服务，只弹一条托盘气泡并泵消息约 10 秒后退出（退出码恒为 0）。用于区分「程序没发」和「Windows 没显示」 |
 | `--install` | 一键安装：拷贝到 `%LOCALAPPDATA%\Programs\dsh-window`，创建桌面/开始菜单快捷方式和卸载项 |
 | `--uninstall` | 卸载：移除快捷方式、注册表卸载项与安装目录 |
 
@@ -177,7 +179,7 @@ local 模式下 `host` 必须是本机地址（`127.0.0.1`、`localhost`、`::1`
 ```powershell
 .\build.ps1                          # 精简版
 .\build.ps1 -Portable                # 精简版 + 便携版（自动下载 Node/MinGit、npm 安装 DSH）
-.\build.ps1 -Version 1.4.0 -IconPath .\my-icon.ico
+.\build.ps1 -Version 1.4.1 -IconPath .\my-icon.ico
 .\build.ps1 -Portable -DshVersion 0.1.0-rc.6 -NpmRegistry https://registry.npmmirror.com
 ```
 
@@ -360,13 +362,14 @@ Drop a `dsh-window.config.json` next to the exe (all keys optional):
 
 ## Session-done notification
 
-Long turns usually finish while nobody is looking at the window, so v1.4.0 adds a "finished" ping: when a session stops running, a Windows tray balloon appears and one click brings the window back.
+Long turns usually finish while nobody is looking at the window, so v1.4.0 adds a "finished" ping: when a session stops running, a Windows tray balloon appears and one click brings the window back. v1.4.1 fixes the "is the window in the foreground" check (it used `ContainsFocus`, which still returns true for a window hidden to the tray, so the balloon never fired) and adds a `--notify-test` self-test entry.
 
 - **DOM probing, no server change**: a small script is injected once after WebView2 initializes and polls the page using `sessionRunningSelector`. The DSH chat client marks what it renders during a turn with a `_running` CSS-module suffix (`EvIC1a_running`), so a hit means "a turn is running". The script reports only transitions, so the server-side mux protocol stays untouched.
 - **Selector is hot-patchable**: a front-end rename does not kill the feature — point `sessionRunningSelector` at the new class instead of waiting for a release.
-- **Only when unfocused**: no balloon while you are watching the window; it fires when the window is in the background, minimized, or tucked away by `closeToTray`.
+- **Only when not in the foreground**: the check uses the Windows foreground window (`GetForegroundWindow`) rather than WinForms focus state — hidden to the tray, minimized, or covered by another window all count as "not looking", and only then does the balloon fire.
 - **Click to restore**: the balloon and the tray icon both restore the window, un-minimize it, and bring it to the foreground.
 - Off by default (`sessionNotify: false`). The probe is injected regardless, so with `logFile` on you can tell "never probed" from "probed but stayed quiet" via `session state: running=true` / `running=false, notify=yes|no`.
+- **Troubleshooting**: `DeepSeek Harness Window.exe --notify-test` should pop a self-test balloon immediately. If that one does not show either, Windows notification settings are blocking it, not the app.
 
 ## Command-line arguments
 
@@ -375,6 +378,7 @@ Long turns usually finish while nobody is looking at the window, so v1.4.0 adds 
 | (none) | Ensure the service is online, then open the window |
 | `--check [--out <path>]` | Headless self-check: no window, no dialogs, no spawn; external mode only probes the URL. `--out` writes a UTF-8 (no BOM) JSON report. Exit 0 = ok, 2 = problems |
 | `--no-window` | Only ensure the service is online, open no window |
+| `--notify-test` | Notification self-test: no window, no server; raises one tray balloon and pumps messages for about 10s, always exit 0. Separates "the app never sent it" from "Windows suppressed it" |
 | `--install` | One-click install: copies to `%LOCALAPPDATA%\Programs\dsh-window`, creates desktop/start-menu shortcuts and an uninstall entry |
 | `--uninstall` | Uninstall: removes shortcuts, the registry entry, and the install directory |
 
@@ -385,7 +389,7 @@ Prerequisites: Windows + PowerShell + .NET Framework 4.x (bundled `csc.exe`). Th
 ```powershell
 .\build.ps1                          # slim build
 .\build.ps1 -Portable                # slim + portable (downloads Node/MinGit, npm-installs DSH)
-.\build.ps1 -Version 1.4.0 -IconPath .\my-icon.ico
+.\build.ps1 -Version 1.4.1 -IconPath .\my-icon.ico
 .\build.ps1 -Portable -DshVersion 0.1.0-rc.6 -NpmRegistry https://registry.npmmirror.com
 ```
 

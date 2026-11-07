@@ -384,6 +384,30 @@ foreach ($case in @(
     }
 }
 
+# ---------------------------------------------------------------- T9: --notify-test self-test path
+# Separates "the app never tried to notify" from "Windows suppressed it".
+$dir = New-Case 't9-notify-test' $cfgExternalLive
+$exe = Join-Path $dir $exeName
+$log = Join-Path $env:LOCALAPPDATA 'DeepSeekHarnessWindow\launcher.log'
+$logBak = $log + '.acceptbak'
+if (Test-Path $log) { Move-Item -Force $log $logBak }
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null
+New-Item -ItemType File -Force -Path $log | Out-Null
+
+$r = Invoke-App $dir '--notify-test' 40
+$tail = Get-LogTail $log 0
+if (Test-Path $logBak) { Remove-Item -Force $log; Move-Item -Force $logBak $log }
+$joined = ($tail -join "`n")
+if ($r.timedOut) {
+    Report 'FAIL' 'T9 notify-test' 'did not exit (message loop not bounded)'
+} elseif ($r.code -ne 0) {
+    Report 'FAIL' 'T9 notify-test' "exit=$($r.code) (expect 0)"
+} elseif ($joined -notmatch 'notify test') {
+    Report 'FAIL' 'T9 notify-test' 'no "notify test" log line'
+} else {
+    Report 'PASS' 'T9 notify-test' "exit=0 in $($r.seconds)s, balloon requested"
+}
+
 if ($null -ne $serveJob) { Stop-Job $serveJob -ErrorAction SilentlyContinue; Remove-Job $serveJob -Force -ErrorAction SilentlyContinue }
 
 Write-Host ''
