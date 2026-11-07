@@ -19,13 +19,19 @@ jobs:
         shell: powershell
         run: .\ci\accept_behavior_windows.ps1 -Source "${{ github.workspace }}\dist" -ServeLocal
 
-      # The `env` context only holds values declared in this workflow, so
-      # ${{ env.LOCALAPPDATA }} is empty unless it is published first.
-      - name: Publish LOCALAPPDATA
+      - name: Collect launcher log
         if: always()
         shell: powershell
         run: |
-          "LOCALAPPDATA=$env:LOCALAPPDATA" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $destDir = "${{ runner.temp }}\dshw-accept"
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          $src = Join-Path $env:LOCALAPPDATA "DeepSeekHarnessWindow\launcher.log"
+          if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $destDir "launcher.log") -Force
+            Write-Host "Copied $src to $destDir"
+          } else {
+            Write-Host "launcher.log not found at $src; skipping copy"
+          }
 
       - name: Upload logs
         if: always()
@@ -33,6 +39,4 @@ jobs:
         with:
           name: accept-logs
           if-no-files-found: warn
-          path: |
-            ${{ runner.temp }}\dshw-accept
-            ${{ env.LOCALAPPDATA }}\DeepSeekHarnessWindow
+          path: ${{ runner.temp }}\dshw-accept
