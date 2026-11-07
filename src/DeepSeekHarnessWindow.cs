@@ -19,16 +19,20 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyDescription("DeepSeek Harness standalone window (WebView2)")]
 [assembly: AssemblyCompany("Community project, not affiliated with DeepSeek")]
 [assembly: AssemblyProduct("DeepSeek Harness Window")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
 
 internal static class Program
 {
     private const string AppTitle = "DeepSeek Harness";
-    private const string AppVersion = "1.3.0";
+    private const string AppVersion = "1.4.0";
     private const string ConfigFileName = "dsh-window.config.json";
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 3080;
+    private const string DefaultSessionSelector = "[class*='_running']";
+    private const int DefaultSessionIntervalMs = 2000;
+    private const int MinSessionIntervalMs = 500;
+    private const int MaxSessionIntervalMs = 30000;
     private const string PickerPatch =
         "- id: directory-picker\r\n" +
         "  disabled: true\r\n" +
@@ -527,6 +531,9 @@ internal static class Program
         public string ServerMode = "local";
         public string ExternalUrl = "";
         public bool HostIsLocal = true;
+        public bool SessionNotify = false;
+        public string SessionRunningSelector = DefaultSessionSelector;
+        public int SessionNotifyIntervalMs = DefaultSessionIntervalMs;
     }
 
     private static readonly List<string> configWarnings = new List<string>();
@@ -623,6 +630,45 @@ internal static class Program
                 cfg.UpdateRepo = (string)map["updateRepo"];
             if (map.ContainsKey("closeToTray")) cfg.CloseToTray = Convert.ToBoolean(map["closeToTray"]);
             if (map.ContainsKey("logFile")) cfg.LogFile = Convert.ToBoolean(map["logFile"]);
+
+            if (map.ContainsKey("sessionNotify"))
+            {
+                try
+                {
+                    cfg.SessionNotify = Convert.ToBoolean(map["sessionNotify"]);
+                }
+                catch
+                {
+                    configWarnings.Add("sessionNotify is not a boolean, using false");
+                }
+            }
+            if (map.ContainsKey("sessionRunningSelector"))
+            {
+                string selector = map["sessionRunningSelector"] as string;
+                if (selector != null && selector.Trim().Length > 0)
+                    cfg.SessionRunningSelector = selector.Trim();
+                else
+                    configWarnings.Add("sessionRunningSelector is empty or not a string, using the default selector");
+            }
+            if (map.ContainsKey("sessionNotifyIntervalMs"))
+            {
+                int interval;
+                try
+                {
+                    interval = Convert.ToInt32(map["sessionNotifyIntervalMs"]);
+                }
+                catch
+                {
+                    interval = 0;
+                }
+                if (interval < MinSessionIntervalMs || interval > MaxSessionIntervalMs)
+                {
+                    configWarnings.Add("sessionNotifyIntervalMs " + interval + " is outside " +
+                        MinSessionIntervalMs + "-" + MaxSessionIntervalMs + ", using " + DefaultSessionIntervalMs);
+                    interval = DefaultSessionIntervalMs;
+                }
+                cfg.SessionNotifyIntervalMs = interval;
+            }
 
             if (map.ContainsKey("externalUrl") && map["externalUrl"] is string)
                 cfg.ExternalUrl = ((string)map["externalUrl"]).Trim();
@@ -728,6 +774,102 @@ internal static class Program
     private static string Quote(string value)
     {
         return "\"" + value.Replace("\"", "\\\"") + "\"";
+    }
+
+    // ---- session state probe ----
+    // The chat UI marks the elements it renders while a turn is running with a
+    // `_running` CSS-module suffix. The probe polls the DOM from inside the
+    // page and reports only transitions, so the launcher never needs the
+    // server-side mux protocol. It is injected even when notifications are
+    // off: that keeps "probe did not run" distinguishable from "probe ran but
+    // stayed silent" in the log.
+
+    internal static string SessionRunningSelector
+    {
+        get
+        {
+            string selector = config == null ? null : config.SessionRunningSelector;
+            if (selector == null || selector.Trim().Length == 0)
+                return DefaultSessionSelector;
+            return selector.Trim();
+        }
+    }
+
+    internal static int SessionNotifyIntervalMs
+    {
+        get
+        {
+            int interval = config == null ? DefaultSessionIntervalMs : config.SessionNotifyIntervalMs;
+            if (interval < MinSessionIntervalMs || interval > MaxSessionIntervalMs)
+                return DefaultSessionIntervalMs;
+            return interval;
+        }
+    }
+
+    internal static bool SessionNotifyEnabled
+    {
+        get { return config != null && config.SessionNotify; }
+    }
+
+    /// <summary>Escapes a value for a single-quoted JavaScript string literal.</summary>
+    private static string JsSingleQuoted(string value)
+    {
+        StringBuilder escaped = new StringBuilder();
+        escaped.Append('\'');
+        foreach (char c in value)
+        {
+            switch (c)
+            {
+                case '\\': escaped.Append("\\\\"); break;
+                case '\'': escaped.Append("\\'"); break;
+                case '"': escaped.Append("\\\""); break;
+                case '\n': escaped.Append("\\n"); break;
+                case '\r': escaped.Append("\\r"); break;
+                case '\t': escaped.Append("\\t"); break;
+                case '\u2028': escaped.Append("\\u2028"); break;
+                case '\u2029': escaped.Append("\\u2029"); break;
+                // Keeps a stray "</script>" in the selector from ending the block.
+                case '<': escaped.Append("\\u003c"); break;
+                default: escaped.Append(c); break;
+            }
+        }
+        escaped.Append('\'');
+        return escaped.ToString();
+    }
+
+    /// <summary>Script registered once via AddScriptToExecuteOnDocumentCreated,
+    /// so it also runs after every navigation and reload.</summary>
+    internal static string BuildSessionProbeScript()
+    {
+        string selector = JsSingleQuoted(SessionRunningSelector);
+        string interval = SessionNotifyIntervalMs.ToString(CultureInfo.InvariantCulture);
+        return
+            "(function () {\r\n" +
+            "  if (window.__dshSessionProbeInstalled) { return; }\r\n" +
+            "  window.__dshSessionProbeInstalled = true;\r\n" +
+            "  var SEL = " + selector + ";\r\n" +
+            "  var IV = " + interval + ";\r\n" +
+            "  var last = null;\r\n" +
+            "  function running() {\r\n" +
+            "    try { return document.querySelector(SEL) ? true : false; } catch (e) { return null; }\r\n" +
+            "  }\r\n" +
+            "  function post(message) {\r\n" +
+            "    try { window.chrome.webview.postMessage(message); } catch (e) { }\r\n" +
+            "  }\r\n" +
+            "  setInterval(function () {\r\n" +
+            "    var now = running();\r\n" +
+            "    if (now === null) { return; }\r\n" +
+            "    if (last === null) {\r\n" +
+            "      last = now;\r\n" +
+            "      post('session-state:' + (now ? '1' : '0'));\r\n" +
+            "      return;\r\n" +
+            "    }\r\n" +
+            "    if (now !== last) {\r\n" +
+            "      last = now;\r\n" +
+            "      post(now ? 'session-busy' : 'session-idle');\r\n" +
+            "    }\r\n" +
+            "  }, IV);\r\n" +
+            "})();\r\n";
     }
 
     [DllImport("user32.dll")]
@@ -969,6 +1111,8 @@ internal sealed class MainForm : Form
     private bool updateCheckQueued;
     private bool reallyExit;
     private NotifyIcon trayIcon;
+    private NotifyIcon sessionNotifyIcon;
+    private bool sessionRunning;
     private bool trayBalloonShown;
     private readonly System.Windows.Forms.Timer retryTimer;
     private int retryCount;
@@ -1030,12 +1174,29 @@ internal sealed class MainForm : Form
             });
             trayIcon.ContextMenuStrip = menu;
             trayIcon.DoubleClick += delegate { ShowFromTray(); };
+            // Also restores the window from the session-idle balloon, which
+            // reuses this icon whenever closeToTray is on.
+            trayIcon.BalloonTipClicked += delegate { ShowFromTray(); };
             trayIcon.Visible = true;
             Program.Log("tray icon created");
         }
         catch (Exception error)
         {
             Program.Log("tray setup failed: " + error.Message);
+            // A half-built icon must not shadow the one the session
+            // notification creates on demand.
+            if (trayIcon != null)
+            {
+                try
+                {
+                    trayIcon.Visible = false;
+                    trayIcon.Dispose();
+                }
+                catch
+                {
+                }
+                trayIcon = null;
+            }
         }
     }
 
@@ -1111,6 +1272,21 @@ internal sealed class MainForm : Form
                 if (!string.IsNullOrEmpty(title))
                     Text = title;
             };
+
+            // Registered once, on the document-created hook, so every
+            // navigation and reload picks the probe up without re-injecting.
+            try
+            {
+                await webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+                    Program.BuildSessionProbeScript());
+                Program.Log("session probe injected, selector=" + Program.SessionRunningSelector +
+                    ", intervalMs=" + Program.SessionNotifyIntervalMs.ToString(CultureInfo.InvariantCulture) +
+                    ", sessionNotify=" + Program.SessionNotifyEnabled);
+            }
+            catch (Exception probeError)
+            {
+                Program.Log("session probe injection failed: " + probeError.Message);
+            }
 
             RestoreWindowState();
 
@@ -1320,17 +1496,114 @@ internal sealed class MainForm : Form
     {
         try
         {
-            if (e.TryGetWebMessageAsString() != "retry")
+            string message = e.TryGetWebMessageAsString();
+            if (message == null)
                 return;
-            // Manual retry: reset the backoff, probe once, never spawn in
-            // external mode.
-            retryTimer.Stop();
-            retryCount = 0;
-            TryReconnect(true);
+            if (message == "retry")
+            {
+                // Manual retry: reset the backoff, probe once, never spawn in
+                // external mode.
+                retryTimer.Stop();
+                retryCount = 0;
+                TryReconnect(true);
+                return;
+            }
+            // Prefix matching on purpose: no JSON parsing for four fixed
+            // tokens, and unknown messages keep being ignored.
+            if (message.StartsWith("session-busy", StringComparison.Ordinal) ||
+                message.StartsWith("session-state:1", StringComparison.Ordinal))
+            {
+                OnSessionRunning();
+                return;
+            }
+            if (message.StartsWith("session-idle", StringComparison.Ordinal))
+            {
+                OnSessionIdle(true);
+                return;
+            }
+            if (message.StartsWith("session-state:0", StringComparison.Ordinal))
+            {
+                // First sample of a fresh document: not a transition, so it
+                // never raises a notification.
+                OnSessionIdle(false);
+            }
         }
         catch
         {
         }
+    }
+
+    private void OnSessionRunning()
+    {
+        sessionRunning = true;
+        Program.Log("session state: running=true");
+    }
+
+    /// <summary>A session just stopped running. Only a real running -> idle
+    /// transition with notifications enabled and the window out of focus
+    /// raises a balloon.</summary>
+    private void OnSessionIdle(bool transition)
+    {
+        bool wasRunning = sessionRunning;
+        sessionRunning = false;
+        // A hidden-to-tray or minimized window never holds focus, so the
+        // focus check alone already covers "the user is not looking at it".
+        bool notify = transition && wasRunning && Program.SessionNotifyEnabled && !ContainsFocus;
+        if (notify)
+            ShowSessionIdleNotification();
+        Program.Log("session state: running=false, notify=" + (notify ? "yes" : "no"));
+    }
+
+    private void ShowSessionIdleNotification()
+    {
+        try
+        {
+            NotifyIcon icon = EnsureSessionNotifyIcon();
+            if (icon == null)
+            {
+                Program.Log("session notification skipped: no tray icon available");
+                return;
+            }
+            icon.ShowBalloonTip(5000, ProgramTitle, "会话已空闲，等待你的输入。点击回到窗口。", ToolTipIcon.Info);
+            Program.Log("session notification shown");
+        }
+        catch (Exception error)
+        {
+            Program.Log("session notification failed: " + error.Message);
+        }
+    }
+
+    /// <summary>Reuses the closeToTray icon when present, otherwise creates a
+    /// dedicated one for the lifetime of the form.</summary>
+    private NotifyIcon EnsureSessionNotifyIcon()
+    {
+        if (trayIcon != null)
+            return trayIcon;
+        if (sessionNotifyIcon != null)
+            return sessionNotifyIcon;
+        NotifyIcon created = new NotifyIcon();
+        created.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        created.Text = ProgramTitle;
+        created.BalloonTipClicked += delegate { ShowFromTray(); };
+        created.Visible = true;
+        sessionNotifyIcon = created;
+        Program.Log("session notification tray icon created");
+        return sessionNotifyIcon;
+    }
+
+    private void DisposeSessionNotifyIcon()
+    {
+        if (sessionNotifyIcon == null)
+            return;
+        try
+        {
+            sessionNotifyIcon.Visible = false;
+            sessionNotifyIcon.Dispose();
+        }
+        catch
+        {
+        }
+        sessionNotifyIcon = null;
     }
 
     private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
@@ -1531,6 +1804,7 @@ internal sealed class MainForm : Form
         {
         }
         SaveWindowState();
+        DisposeSessionNotifyIcon();
         if (trayIcon != null)
         {
             try

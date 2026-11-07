@@ -108,8 +108,14 @@ if ($ServeLocal) {
                 $stream = $client.GetStream()
                 $reader = New-Object System.IO.StreamReader($stream)
                 while (-not [string]::IsNullOrEmpty($reader.ReadLine())) { }
-                $payload = "HTTP/1.1 200 OK`r`nContent-Type: text/plain`r`nContent-Length: 2`r`nConnection: close`r`n`r`nok"
-                $bytes = [System.Text.Encoding]::ASCII.GetBytes($payload)
+                $html = '<!doctype html><html><head><meta charset="utf-8"><title>stub</title></head>' +
+                        '<body><div id="r" class="x_running">running</div>' +
+                        "<script>setTimeout(function(){document.getElementById('r').className='idle';},5000);</script>" +
+                        '</body></html>'
+                $payload = "HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: " +
+                           [System.Text.Encoding]::UTF8.GetByteCount($html).ToString() +
+                           "`r`nConnection: close`r`n`r`n" + $html
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
                 $stream.Write($bytes, 0, $bytes.Length)
                 $stream.Flush()
                 $client.Close()
@@ -164,6 +170,36 @@ $cfgLocalLocalhost = @"
   "killServerOnClose": true,
   "checkUpdates": false,
   "logFile": true
+}
+"@
+
+$cfgSessionNotifyOn = @"
+{
+  "serverMode": "external",
+  "externalUrl": "$LiveUrl",
+  "waitTimeoutMs": 3000,
+  "killServerOnClose": false,
+  "closeToTray": true,
+  "checkUpdates": false,
+  "logFile": true,
+  "sessionNotify": true,
+  "sessionRunningSelector": "[class*='_running']",
+  "sessionNotifyIntervalMs": 2000
+}
+"@
+
+$cfgSessionNotifyOff = @"
+{
+  "serverMode": "external",
+  "externalUrl": "$LiveUrl",
+  "waitTimeoutMs": 3000,
+  "killServerOnClose": false,
+  "closeToTray": true,
+  "checkUpdates": false,
+  "logFile": true,
+  "sessionNotify": false,
+  "sessionRunningSelector": "[class*='_running']",
+  "sessionNotifyIntervalMs": 2000
 }
 "@
 
@@ -304,6 +340,49 @@ if (Test-Path $logBak) { Remove-Item -Force $log; Move-Item -Force $logBak $log 
 Get-Process -Name 'DeepSeek Harness Window' -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -like (Join-Path $Work '*') } |
     ForEach-Object { try { $_.Kill() } catch {} }
+
+# ---------------------------------------------------------------- T7/T8: session-idle notification
+# The stub page is "running" for 5s then goes idle. The probe must log the
+# transition; only T7 (sessionNotify=true) may raise a notification.
+function Get-LogTail {
+    param([string]$path, [int]$skipLines)
+    if (-not (Test-Path $path)) { return @() }
+    return @(Get-Content -LiteralPath $path -Encoding UTF8 | Select-Object -Skip $skipLines)
+}
+
+foreach ($case in @(
+        @{ name = 'T7 session-notify/on';  cfg = $cfgSessionNotifyOn;  wantNotify = 'yes' },
+        @{ name = 'T8 session-notify/off'; cfg = $cfgSessionNotifyOff; wantNotify = 'no' })) {
+
+    $dir = New-Case ($case.name.Split(' ')[0].ToLower()) $case.cfg
+    $exe = Join-Path $dir $exeName
+    $log = Join-Path $env:LOCALAPPDATA 'DeepSeekHarnessWindow\launcher.log'
+    $logBak = $log + '.acceptbak'
+    if (Test-Path $log) { Move-Item -Force $log $logBak }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null
+    New-Item -ItemType File -Force -Path $log | Out-Null
+
+    $p = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+    Start-Sleep -Seconds 16
+    try { $p.Kill() } catch {}
+
+    $tail = Get-LogTail $log 0
+    if (Test-Path $logBak) { Remove-Item -Force $log; Move-Item -Force $logBak $log }
+
+    $joined = ($tail -join "`n")
+    $sawRunning = $joined -match 'session state: running=true'
+    $sawIdle = $joined -match 'session state: running=false'
+    $notified = $joined -match 'notify=yes'
+    if (-not ($sawRunning -and $sawIdle)) {
+        Report 'INFO' $case.name 'probe produced no state transition (WebView2 may not render in this session)'
+    } elseif ($case.wantNotify -eq 'yes' -and -not $notified) {
+        Report 'FAIL' $case.name 'transition seen but no notification (expected notify=yes)'
+    } elseif ($case.wantNotify -eq 'no' -and $notified) {
+        Report 'FAIL' $case.name 'notification raised while sessionNotify=false'
+    } else {
+        Report 'PASS' $case.name "transition seen, notify=$($case.wantNotify)"
+    }
+}
 
 if ($null -ne $serveJob) { Stop-Job $serveJob -ErrorAction SilentlyContinue; Remove-Job $serveJob -Force -ErrorAction SilentlyContinue }
 
