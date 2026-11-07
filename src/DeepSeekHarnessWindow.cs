@@ -19,13 +19,13 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyDescription("DeepSeek Harness standalone window (WebView2)")]
 [assembly: AssemblyCompany("Community project, not affiliated with DeepSeek")]
 [assembly: AssemblyProduct("DeepSeek Harness Window")]
-[assembly: AssemblyVersion("1.4.1.0")]
-[assembly: AssemblyFileVersion("1.4.1.0")]
+[assembly: AssemblyVersion("1.4.2.0")]
+[assembly: AssemblyFileVersion("1.4.2.0")]
 
 internal static class Program
 {
     private const string AppTitle = "DeepSeek Harness";
-    private const string AppVersion = "1.4.1";
+    private const string AppVersion = "1.4.2";
     private const string ConfigFileName = "dsh-window.config.json";
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 3080;
@@ -1390,6 +1390,10 @@ internal sealed class MainForm : Form
             webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
             webView.CoreWebView2.NewWindowRequested += OnNewWindowRequested;
+            // WebView2 silently drops a top-level navigation to an unregistered
+            // scheme (e.g. the "dshvnc:" link the desktop-ctl sidebar button
+            // clicks). Catch it here and hand it to the OS instead.
+            webView.CoreWebView2.NavigationStarting += OnNavigationStarting;
             webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
             webView.CoreWebView2.DocumentTitleChanged += delegate
@@ -1756,6 +1760,10 @@ internal sealed class MainForm : Form
 
     private void OnNewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs e)
     {
+        // Every popup goes to the system browser, deliberately: the embedded
+        // window is a single-page shell and has no chrome for extra tabs.
+        // So the IsExternalScheme filter is intentionally not applied here and
+        // http/https popups keep opening in the system browser as before.
         e.Handled = true;
         try
         {
@@ -1763,6 +1771,55 @@ internal sealed class MainForm : Form
         }
         catch
         {
+        }
+    }
+
+    private void OnNavigationStarting(object sender, CoreWebView2NavigationStartingEventArgs e)
+    {
+        string uri = e.Uri;
+        if (!IsExternalScheme(uri))
+        {
+            return;
+        }
+        // Cancel first: WebView2 would otherwise fail the navigation itself and
+        // leave the shell showing the previous page with no feedback at all.
+        e.Cancel = true;
+        Program.Log("navigation to external scheme handed to OS: " + uri);
+        try
+        {
+            Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>
+    /// True when a URI should be handed to the operating system instead of being
+    /// rendered inside the embedded browser.
+    /// </summary>
+    private static bool IsExternalScheme(string uri)
+    {
+        if (string.IsNullOrEmpty(uri))
+            return true;
+        Uri parsed;
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out parsed))
+            return true;
+        switch (parsed.Scheme.ToLowerInvariant())
+        {
+            case "http":
+            case "https":
+            case "file":
+            case "about":
+            case "data":
+            case "blob":
+            case "chrome":
+            case "edge":
+            case "ws":
+            case "wss":
+                return false;
+            default:
+                return true;
         }
     }
 
