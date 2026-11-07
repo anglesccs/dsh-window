@@ -64,6 +64,37 @@ powershell -ExecutionPolicy Bypass -File .\tools\file-icons\install-file-icons.p
 都会被系统判定无效并回退。所以有 `UserChoice` 时只改它指向的 ProgID 的 `DefaultIcon`，
 这是能生效、也不破坏用户已选默认应用的做法。
 
+### 为什么会因为路径空格失效
+
+`DefaultIcon` 的值格式是 `<路径>,<索引>`，**路径含空格时必须加引号**：
+
+```text
+DefaultIcon = "D:\DSH Script\icons\doc.ico",0     ← 生效
+DefaultIcon = D:\DSH Script\icons\doc.ico,0       ← Shell 解析失败，仍是通用灰图标
+```
+
+宿主机实测：同一台机器、同一份 ico，只差一对引号，结果就是「蓝色 doc / 绿色 xls /
+橙色 ppt」和「一片通用灰图标」的区别。原因是逗号既当分隔符又可能出现在路径里，
+Shell 只认「引号包起来的路径 + `,` + 索引」这一种写法；不加引号时它会在第一个空格
+（或逗号）处切错，取不到图标文件就静默回退。
+
+所以安装器**无条件加引号**（`Format-IconValue`），路径里若混进 `"` 先剔掉兜底。
+备份和还原仍按原字符串原样记录、原样写回，不给还原值加引号——否则会把用户原本
+正确的值改坏。
+
+验证命令（编排方验收脚本 `ci\accept_file_icons.ps1` 已覆盖，含路径空格回归）：
+
+```powershell
+# 取 Shell 实际渲染的图标，比色：doc 应接近 rgb(47,113,194)，xls rgb(34,135,83)，
+# ppt rgb(216,98,66)，且必须明显偏离「通用图标」基准色。
+.\ci\accept_file_icons.ps1 -IconDir "$env:RUNNER_TEMP\dsh icons" `
+    -InstallScript .\tools\file-icons\install-file-icons.ps1
+```
+
+`SHGetFileInfo` 拿 `SHGFI_ICON` 渲染出的位图求不透明像素均值，再和未注册扩展名的
+通用图标比色差；差得不够就判 FAIL。这条路子不看注册表文本，路径写错（比如漏引号）
+会立刻变红。
+
 ## 验证
 
 CI（`.github/workflows/accept.yml`，windows-latest）里跑：

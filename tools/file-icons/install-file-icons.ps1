@@ -136,6 +136,14 @@ function Get-DefaultIconKey([string]$ProgId) {
     return $script:ClassesRoot + '\' + $ProgId + '\DefaultIcon'
 }
 
+function Format-IconValue([string]$IconPath) {
+    # DefaultIcon 的值格式是 <路径>,<索引>。路径含空格时必须加引号，否则 Shell
+    # 解析失败、退回通用图标（实测：D:\DSH Script\icons\doc.ico,0 无效，
+    # "D:\DSH Script\icons\doc.ico",0 才生效）。所以这里总是加引号。
+    $clean = ([string]$IconPath).Replace('"', '')
+    return ('"' + $clean + '",0')
+}
+
 function Get-UserChoiceKey([string]$Extension) {
     return $script:FileExtsRoot + '\' + $Extension + '\UserChoice'
 }
@@ -159,7 +167,10 @@ function Get-UserChoiceProgId([string]$Extension) {
 function Test-IsOurIconValue([string]$Value) {
     if ($null -eq $Value) { return $false }
     if ($Value.Length -eq 0) { return $false }
-    return $Value.ToLowerInvariant().StartsWith($script:IconDirLower + '\')
+    # 值里可能带引号（"<路径>",<索引>），比对路径前先去掉引号，否则认不出自己写的值。
+    $path = $Value.Replace('"', '').Trim()
+    if ($path.Length -eq 0) { return $false }
+    return $path.ToLowerInvariant().StartsWith($script:IconDirLower + '\')
 }
 
 function Test-IsOurProgId([string]$Value) {
@@ -399,7 +410,7 @@ function Invoke-Install {
     foreach ($icoName in $script:ProgIdMap.Keys) {
         $meta = $script:ProgIdMap[$icoName]
         $key = Get-ProgIdKey $meta.ProgId
-        $icoValue = (Join-Path $script:IconDir $icoName) + ',0'
+        $icoValue = Format-IconValue (Join-Path $script:IconDir $icoName)
         New-Item -Path $key -Force | Out-Null
         Set-RegDefault $key $meta.Label
         Set-RegDefault (Get-DefaultIconKey $meta.ProgId) $icoValue
@@ -415,7 +426,7 @@ function Invoke-Install {
     $viaChoice = 0
     $skipped = 0
     foreach ($ext in $script:ExtensionMap.Keys) {
-        $icoValue = (Join-Path $script:IconDir $script:ExtensionMap[$ext]) + ',0'
+        $icoValue = Format-IconValue (Join-Path $script:IconDir $script:ExtensionMap[$ext])
         $extKey = Get-ExtKey $ext
         $userChoice = Get-UserChoiceProgId $ext
 

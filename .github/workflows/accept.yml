@@ -27,6 +27,17 @@ jobs:
         shell: powershell
         run: .\ci\accept_file_icons.ps1 -IconDir "${{ github.workspace }}\tools\file-icons" -InstallScript "${{ github.workspace }}\tools\file-icons\install-file-icons.ps1"
 
+      - name: Copy icons to a path with a space
+        shell: powershell
+        run: |
+          $dst = Join-Path $env:RUNNER_TEMP 'dsh icons'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item "${{ github.workspace }}\tools\file-icons\*.ico" -Destination $dst -Force
+
+      - name: File icon acceptance (space in path)
+        shell: powershell
+        run: .\ci\accept_file_icons.ps1 -IconDir "${{ runner.temp }}\dsh icons" -InstallScript "${{ github.workspace }}\tools\file-icons\install-file-icons.ps1"
+
       - name: Collect launcher log
         if: always()
         shell: powershell
