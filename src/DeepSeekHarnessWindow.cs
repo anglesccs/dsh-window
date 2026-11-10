@@ -126,7 +126,7 @@ internal static class Program
                     Log("refuse to spawn: host " + config.Host + " is not a local address");
                     if (noWindow)
                         return 3;
-                    return RunWindow(null, false);
+                    return RunWindow(null, false, startMinimized);
                 }
                 // Local mode needs the runtime only when something has to be
                 // started; an already-running service needs no local Node.
