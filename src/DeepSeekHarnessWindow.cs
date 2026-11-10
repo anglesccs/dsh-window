@@ -19,13 +19,13 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyDescription("DeepSeek Harness standalone window (WebView2)")]
 [assembly: AssemblyCompany("Community project, not affiliated with DeepSeek")]
 [assembly: AssemblyProduct("DeepSeek Harness Window")]
-[assembly: AssemblyVersion("1.4.4.0")]
-[assembly: AssemblyFileVersion("1.4.4.0")]
+[assembly: AssemblyVersion("1.4.5.0")]
+[assembly: AssemblyFileVersion("1.4.5.0")]
 
 internal static class Program
 {
     private const string AppTitle = "DeepSeek Harness";
-    private const string AppVersion = "1.4.4";
+    private const string AppVersion = "1.4.5";
     private const string ConfigFileName = "dsh-window.config.json";
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 3080;
@@ -74,6 +74,7 @@ internal static class Program
             bool install = HasFlag(args, "--install");
             bool uninstall = HasFlag(args, "--uninstall");
             bool notifyTest = HasFlag(args, "--notify-test");
+            bool startMinimized = HasFlag(args, "--minimized") || HasFlag(args, "--tray");
             // Its lines must land in the log even when logFile is off, and even
             // when the failure happens before the config is loaded.
             logAlways = notifyTest;
@@ -161,7 +162,7 @@ internal static class Program
             if (noWindow)
                 return serverReady ? 0 : 3;
 
-            return RunWindow(spawnedServer, serverReady);
+            return RunWindow(spawnedServer, serverReady, startMinimized);
         }
         catch (Exception error)
         {
@@ -183,7 +184,7 @@ internal static class Program
     }
 
     /// <summary>Shows the main window (single instance) and runs the message loop.</summary>
-    private static int RunWindow(Process ownedServer, bool serverReady)
+    private static int RunWindow(Process ownedServer, bool serverReady, bool startMinimized)
     {
         bool createdNew;
         singleInstance = new Mutex(true, @"Local\DeepSeekHarnessWindow.v2", out createdNew);
@@ -197,8 +198,9 @@ internal static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         // Closing may only stop a server this process owns and only in local mode.
         bool canKill = config.KillServerOnClose && !IsExternalMode(config) && config.HostIsLocal;
+        bool trayEnabled = config.CloseToTray || startMinimized;
         Application.Run(new MainForm(ownedServer, appUrl, serverReady, canKill,
-            config.CloseToTray, IsExternalMode(config)));
+            trayEnabled, IsExternalMode(config), startMinimized));
         return 0;
     }
 
@@ -1400,6 +1402,7 @@ internal sealed class MainForm : Form
     private readonly bool killServerOnClose;
     private readonly bool closeToTray;
     private readonly bool externalMode;
+    private readonly bool startMinimized;
     private readonly string webUrl;
     private bool serverReady;
     private bool updateCheckQueued;
@@ -1415,7 +1418,7 @@ internal sealed class MainForm : Form
     private volatile bool suppressNextNavigationError;
 
     public MainForm(Process ownedServer, string webUrl, bool serverReady, bool killServerOnClose,
-        bool closeToTray, bool externalMode)
+        bool closeToTray, bool externalMode, bool startMinimized)
     {
         this.ownedServer = ownedServer;
         this.webUrl = webUrl;
@@ -1423,6 +1426,7 @@ internal sealed class MainForm : Form
         this.killServerOnClose = killServerOnClose;
         this.closeToTray = closeToTray;
         this.externalMode = externalMode;
+        this.startMinimized = startMinimized;
 
         Text = ProgramTitle;
         MinimumSize = new Size(800, 560);
@@ -1432,6 +1436,12 @@ internal sealed class MainForm : Form
         }
         catch
         {
+        }
+
+        if (startMinimized)
+        {
+            ShowInTaskbar = false;
+            WindowState = FormWindowState.Minimized;
         }
 
         webView = new WebView2();
@@ -1497,6 +1507,7 @@ internal sealed class MainForm : Form
 
     private void ShowFromTray()
     {
+        ShowInTaskbar = true;
         Show();
         if (WindowState == FormWindowState.Minimized)
             WindowState = FormWindowState.Normal;
@@ -1586,6 +1597,19 @@ internal sealed class MainForm : Form
             }
 
             RestoreWindowState();
+
+            if (startMinimized)
+            {
+                try
+                {
+                    Hide();
+                    Program.Log("started minimized to tray");
+                }
+                catch (Exception hideError)
+                {
+                    Program.Log("failed to stay minimized: " + hideError.Message);
+                }
+            }
 
             if (serverReady)
             {

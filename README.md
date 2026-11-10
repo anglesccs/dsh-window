@@ -170,6 +170,7 @@ local 模式下 `host` 必须是本机地址（`127.0.0.1`、`localhost`、`::1`
 | （无） | 确保服务在线，然后打开窗口 |
 | `--check [--out <path>]` | 无界面自检：不建窗口、不弹窗、不 spawn；external 模式只探 URL。`--out` 写 UTF-8 无 BOM 的 JSON 报告。退出码 0=通过 / 2=有问题 |
 | `--no-window` | 只确保服务在线，不打开窗口 |
+| `--minimized`（别名 `--tray`） | 启动即隐藏到托盘：窗口不显示、不占任务栏，托盘图标常驻；不带该参数时行为不变 |
 | `--notify-test` | 通知自测：不建窗口、不连服务，只弹一条托盘气泡并泵消息约 10 秒后退出（退出码恒为 0）。用于区分「程序没发」和「Windows 没显示」 |
 | `--install` | 一键安装：拷贝到 `%LOCALAPPDATA%\Programs\dsh-window`，创建桌面/开始菜单快捷方式和卸载项 |
 | `--uninstall` | 卸载：移除快捷方式、注册表卸载项与安装目录 |
@@ -382,6 +383,7 @@ Long turns usually finish while nobody is looking at the window, so v1.4.0 adds 
 | (none) | Ensure the service is online, then open the window |
 | `--check [--out <path>]` | Headless self-check: no window, no dialogs, no spawn; external mode only probes the URL. `--out` writes a UTF-8 (no BOM) JSON report. Exit 0 = ok, 2 = problems |
 | `--no-window` | Only ensure the service is online, open no window |
+| `--minimized` (alias `--tray`) | Start hidden in the tray: no window, no taskbar button, tray icon present; behavior is unchanged without the flag |
 | `--notify-test` | Notification self-test: no window, no server; raises one tray balloon and pumps messages for about 10s, always exit 0. Separates "the app never sent it" from "Windows suppressed it" |
 | `--install` | One-click install: copies to `%LOCALAPPDATA%\Programs\dsh-window`, creates desktop/start-menu shortcuts and an uninstall entry |
 | `--uninstall` | Uninstall: removes shortcuts, the registry entry, and the install directory |
