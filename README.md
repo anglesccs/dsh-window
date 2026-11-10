@@ -119,6 +119,7 @@ local 模式下 `host` 必须是本机地址（`127.0.0.1`、`localhost`、`::1`
 {
   "serverMode": "local",
   "externalUrl": "",
+  "dataDir": "",
   "host": "127.0.0.1",
   "port": 3080,
   "waitTimeoutMs": 30000,
@@ -138,6 +139,7 @@ local 模式下 `host` 必须是本机地址（`127.0.0.1`、`localhost`、`::1`
 | --- | --- | --- |
 | `serverMode` | `local` | `local`=必要时拉起本地 DSH；`external`=只连 `externalUrl`，绝不解析运行时/不 spawn/不 kill。非法值回落 `local` 并记日志 |
 | `externalUrl` | 空 | 非空则直接作为窗口地址（允许 `https://`、允许带路径），并**强制 external 模式**；末尾无斜杠会自动补 |
+| `dataDir` | 空 | 数据目录：`launcher.log`、WebView2 用户数据（`WebView2Data`）、`window-state.json` 都写到这里。空=沿用 `%LOCALAPPDATA%\DeepSeekHarnessWindow`；非绝对路径或不可创建时回退默认并记日志（`--check` 的 `report.json` 里有 `dataDir` / `dataDirSource` / `dataDirOk` / `dataDirError`） |
 | `host` / `port` | `127.0.0.1` / `3080` | 服务地址；改端口即可与其它实例共存 |
 | `waitTimeoutMs` | `30000` | 等待服务就绪的超时 |
 | `killServerOnClose` | `true` | 服务由本程序启动时，关窗是否一并停止 |
@@ -329,6 +331,7 @@ Drop a `dsh-window.config.json` next to the exe (all keys optional):
 {
   "serverMode": "local",
   "externalUrl": "",
+  "dataDir": "",
   "host": "127.0.0.1",
   "port": 3080,
   "waitTimeoutMs": 30000,
@@ -348,6 +351,7 @@ Drop a `dsh-window.config.json` next to the exe (all keys optional):
 | --- | --- | --- |
 | `serverMode` | `local` | `local` = start DSH when needed; `external` = only connect to `externalUrl` (never resolve/spawn/kill). Invalid values fall back to `local` with a log warning |
 | `externalUrl` | empty | When non-empty, used as the window URL (http/https, paths allowed) and forces external mode; a missing trailing slash is added |
+| `dataDir` | empty | Data directory holding `launcher.log`, the WebView2 user-data folder (`WebView2Data`) and `window-state.json`. Empty keeps `%LOCALAPPDATA%\DeepSeekHarnessWindow`; a relative or uncreatable path falls back to that default with a log warning (`--check` reports `dataDir` / `dataDirSource` / `dataDirOk` / `dataDirError`) |
 | `host` / `port` | `127.0.0.1` / `3080` | Service address; change the port to coexist with other instances |
 | `waitTimeoutMs` | `30000` | Service readiness timeout |
 | `killServerOnClose` | `true` | Stop the service on window close when this app started it |

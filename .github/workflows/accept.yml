@@ -27,6 +27,10 @@ jobs:
         shell: powershell
         run: .\ci\accept_file_icons.ps1 -IconDir "${{ github.workspace }}\tools\file-icons" -InstallScript "${{ github.workspace }}\tools\file-icons\install-file-icons.ps1"
 
+      - name: Data directory acceptance
+        shell: powershell
+        run: .\ci\accept_datadir_windows.ps1 -Source "${{ github.workspace }}\dist"
+
       - name: Copy icons to a path with a space
         shell: powershell
         run: |

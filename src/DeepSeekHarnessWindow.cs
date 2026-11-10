@@ -19,13 +19,13 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyDescription("DeepSeek Harness standalone window (WebView2)")]
 [assembly: AssemblyCompany("Community project, not affiliated with DeepSeek")]
 [assembly: AssemblyProduct("DeepSeek Harness Window")]
-[assembly: AssemblyVersion("1.4.3.0")]
-[assembly: AssemblyFileVersion("1.4.3.0")]
+[assembly: AssemblyVersion("1.4.4.0")]
+[assembly: AssemblyFileVersion("1.4.4.0")]
 
 internal static class Program
 {
     private const string AppTitle = "DeepSeek Harness";
-    private const string AppVersion = "1.4.3";
+    private const string AppVersion = "1.4.4";
     private const string ConfigFileName = "dsh-window.config.json";
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 3080;
@@ -52,9 +52,12 @@ internal static class Program
     private static bool configInvalid;
     private static bool logAlways;
 
-    internal static readonly string LogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "DeepSeekHarnessWindow", "launcher.log");
+    /// <summary>Log sink inside <see cref="DataRoot"/>; it falls back to the
+    /// default root until the config is loaded, so early log lines still work.</summary>
+    internal static string LogPath
+    {
+        get { return Path.Combine(DataRoot, "launcher.log"); }
+    }
 
     [STAThread]
     private static int Main(string[] args)
@@ -90,11 +93,16 @@ internal static class Program
             // local Node/DSH runtime is needed at all.
             string configPath = Path.Combine(appDir, ConfigFileName);
             config = LoadConfig(configPath);
+            // Anything logged before this point used the default root.
+            ResetDataRoot();
             appUrl = BuildAppUrl(config, out urlValid);
             // In external mode the effective target is the URL, so report
             // hostIsLocal for that host instead of the unused `host` key.
             if (IsExternalMode(config))
                 config.HostIsLocal = UrlHostIsLocal(appUrl);
+            // Resolve the data root before the warnings are flushed, so an
+            // invalid or unusable dataDir is reported through the log.
+            GetDataRootInfo();
             FlushConfigWarnings();
             patchPath = Path.Combine(localAppData, "DeepSeekHarnessLauncher", "directory-picker.patch.yml");
 
@@ -490,12 +498,22 @@ internal static class Program
         }
 
         bool ok = problems.Count == 0;
+        // Probe the data directory: an unusable dataDir only degrades to the
+        // default root, it is not a check failure (the exit code stays 0).
+        // dataDirOk judges the effective root only; a rejected `dataDir` shows
+        // up in dataDirError (and in dataDirSource="default").
+        bool dataDirOk = VerifyDataRoot();
+        string dataDirError = DataDirError == null ? "" : DataDirError;
         Dictionary<string, object> report = new Dictionary<string, object>();
         report["version"] = AppVersion;
         report["serverMode"] = config.ServerMode;
         report["url"] = appUrl;
         report["configPath"] = configPath;
         report["configFound"] = configFound;
+        report["dataDir"] = DataRoot;
+        report["dataDirSource"] = DataDirSource;
+        report["dataDirOk"] = dataDirOk;
+        report["dataDirError"] = dataDirError;
         Dictionary<string, object> runtime = new Dictionary<string, object>();
         runtime["available"] = runtimeAvailable;
         runtime["nodeExe"] = nodeExe;
@@ -548,6 +566,10 @@ internal static class Program
             (Convert.ToBoolean(report["configFound"]) ? "" : " (missing)"));
         text.AppendLine("  runtime    : " + Convert.ToBoolean(
             ((Dictionary<string, object>)report["runtime"])["available"]));
+        text.AppendLine("  dataDir    : " + report["dataDir"] + " (" + report["dataDirSource"] + ")");
+        text.AppendLine("  dataDirOk  : " + report["dataDirOk"]);
+        if (!string.IsNullOrEmpty(Convert.ToString(report["dataDirError"])))
+            text.AppendLine("  dataDirErr : " + report["dataDirError"]);
         text.AppendLine("  ok         : " + report["ok"]);
         List<string> problems = report["problems"] as List<string>;
         if (problems != null && problems.Count > 0)
@@ -630,6 +652,7 @@ internal static class Program
         public bool SessionNotify = false;
         public string SessionRunningSelector = DefaultSessionSelector;
         public int SessionNotifyIntervalMs = DefaultSessionIntervalMs;
+        public string DataDir = "";
     }
 
     private static readonly List<string> configWarnings = new List<string>();
@@ -638,9 +661,145 @@ internal static class Program
     /// log sink is usable they are simply kept).</summary>
     private static void FlushConfigWarnings()
     {
-        foreach (string warning in configWarnings)
+        // Snapshot: logging may resolve the data root and append a warning.
+        foreach (string warning in new List<string>(configWarnings))
             Log("config warning: " + warning);
         configWarnings.Clear();
+    }
+
+    private static string DefaultDataRoot
+    {
+        get
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DeepSeekHarnessWindow");
+        }
+    }
+
+    private sealed class DataRootInfo
+    {
+        public string Path;
+        public string Source;   // "config" | "default"
+        public string Error = "";
+    }
+
+    private static DataRootInfo dataRootInfo;
+
+    /// <summary>Effective data directory for launcher.log, WebView2Data and
+    /// window-state.json: `dataDir` from the config when it is an absolute,
+    /// creatable path, otherwise %LOCALAPPDATA%\DeepSeekHarnessWindow.</summary>
+    internal static string DataRoot
+    {
+        get { return GetDataRootInfo().Path; }
+    }
+
+    /// <summary>"config" when the data root came from `dataDir`, "default"
+    /// when the built-in %LOCALAPPDATA% location is in use.</summary>
+    internal static string DataDirSource
+    {
+        get { return GetDataRootInfo().Source; }
+    }
+
+    /// <summary>Why a configured `dataDir` was rejected; empty when there is
+    /// nothing to report.</summary>
+    internal static string DataDirError
+    {
+        get { return GetDataRootInfo().Error; }
+    }
+
+    /// <summary>Drops the cached root so the next lookup sees the loaded
+    /// config; lines logged before that point used the default root.</summary>
+    private static void ResetDataRoot()
+    {
+        dataRootInfo = null;
+    }
+
+    /// <summary>Resolves the data root once per process. Failures never throw:
+    /// they are recorded and the default root is used instead.</summary>
+    private static DataRootInfo GetDataRootInfo()
+    {
+        if (dataRootInfo != null)
+            return dataRootInfo;
+        DataRootInfo info = new DataRootInfo();
+        info.Path = DefaultDataRoot;
+        info.Source = "default";
+        // Published before the work below, so a re-entrant call (Log) sees a
+        // usable value instead of recursing.
+        dataRootInfo = info;
+
+        if (config == null || string.IsNullOrWhiteSpace(config.DataDir))
+            return info;
+
+        string requested = "";
+        try
+        {
+            requested = Environment.ExpandEnvironmentVariables(config.DataDir.Trim());
+            if (!Path.IsPathRooted(requested))
+            {
+                info.Error = "dataDir is not an absolute path: " + requested;
+            }
+            else
+            {
+                string full = Path.GetFullPath(requested);
+                Directory.CreateDirectory(full);
+                info.Path = full;
+                info.Source = "config";
+            }
+        }
+        catch (Exception error)
+        {
+            info.Error = "dataDir unusable (" + requested + "): " + error.Message;
+        }
+
+        if (info.Source != "config")
+        {
+            configWarnings.Add(info.Error + ", using " + DefaultDataRoot);
+            info.Path = DefaultDataRoot;
+        }
+        return info;
+    }
+
+    /// <summary>Creates and write-probes the effective data root. A failure
+    /// falls back to the default root; it never fails the run. The result is
+    /// about the root actually in use, so a rejected `dataDir` that fell back
+    /// to a writable default is still true (it shows up in DataDirError).</summary>
+    private static bool VerifyDataRoot()
+    {
+        DataRootInfo info = GetDataRootInfo();
+        string error;
+        if (ProbeWritable(info.Path, out error))
+            return true;
+        string message = "dataDir not writable (" + info.Path + "): " + error;
+        info.Error = info.Error.Length == 0 ? message : info.Error + "; " + message;
+        // Switch first: the warning must land in the fallback root, not in the
+        // directory that just failed.
+        info.Path = DefaultDataRoot;
+        info.Source = "default";
+        Log(message + ", using " + DefaultDataRoot);
+        // Keep the log sink usable for the rest of the run.
+        ProbeWritable(info.Path, out error);
+        return false;
+    }
+
+    /// <summary>Creates the directory and writes (then deletes) a probe file.</summary>
+    private static bool ProbeWritable(string path, out string error)
+    {
+        error = "";
+        string probe = Path.Combine(path, ".write-probe-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(path);
+            File.WriteAllText(probe, "ok", new UTF8Encoding(false));
+            File.Delete(probe);
+            return true;
+        }
+        catch (Exception failure)
+        {
+            error = failure.Message;
+            TryDelete(probe);
+            return false;
+        }
     }
 
     /// <summary>True when the host resolves to this machine, so spawning a
@@ -768,6 +927,15 @@ internal static class Program
 
             if (map.ContainsKey("externalUrl") && map["externalUrl"] is string)
                 cfg.ExternalUrl = ((string)map["externalUrl"]).Trim();
+
+            if (map.ContainsKey("dataDir"))
+            {
+                string dataDir = map["dataDir"] as string;
+                if (dataDir != null && dataDir.Trim().Length > 0)
+                    cfg.DataDir = dataDir.Trim();
+                else if (dataDir == null)
+                    configWarnings.Add("dataDir is not a string, using the default data directory");
+            }
 
             string mode = "";
             if (map.ContainsKey("serverMode"))
@@ -1381,9 +1549,7 @@ internal sealed class MainForm : Form
     {
         try
         {
-            string userData = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "DeepSeekHarnessWindow", "WebView2Data");
+            string userData = Path.Combine(Program.DataRoot, "WebView2Data");
             CoreWebView2Environment environment =
                 await CoreWebView2Environment.CreateAsync(null, userData);
             await webView.EnsureCoreWebView2Async(environment);
@@ -1842,9 +2008,7 @@ internal sealed class MainForm : Form
     {
         get
         {
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "DeepSeekHarnessWindow", "window-state.json");
+            return Path.Combine(Program.DataRoot, "window-state.json");
         }
     }
 
